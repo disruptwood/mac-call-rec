@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "call-recorder"
+version = "0.1.0"
+description = "Record both sides of a voice call on macOS"
+requires-python = ">=3.11"
+
+[project.scripts]
+call-recorder = "recorder.cli:main"
