@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import signal
 import sys
+import termios
 import time
+import tty
 from pathlib import Path
 
 from .audio import detect_audio_setup
@@ -61,30 +64,57 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     print(f"\nRecording started: {session.session_id}")
     print(f"Tracks: {', '.join(t.name for t in session.tracks)}")
-    print("Press Ctrl+C to stop recording.\n")
+    print("Controls: [space] pause/resume, [q] or Ctrl+C to stop\n")
+
+    stopping = False
 
     def handle_signal(sig, frame):
-        print("\nStopping recording...")
-        result = engine.stop()
-        PID_FILE.unlink(missing_ok=True)
-        _print_result(result)
-        sys.exit(0)
+        nonlocal stopping
+        if stopping:
+            return
+        stopping = True
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    # Keep alive
+    # Raw terminal mode for keypress detection
+    old_settings = termios.tcgetattr(sys.stdin)
     try:
-        while True:
+        tty.setraw(sys.stdin.fileno())
+
+        while not stopping:
             status = engine.status()
             duration = status["duration_seconds"]
             mins, secs = divmod(int(duration), 60)
             hrs, mins = divmod(mins, 60)
-            sys.stdout.write(f"\rRecording... {hrs:02d}:{mins:02d}:{secs:02d}")
+            state = status["state"]
+
+            if state == "paused":
+                label = f"PAUSED  {hrs:02d}:{mins:02d}:{secs:02d}"
+            else:
+                label = f"REC     {hrs:02d}:{mins:02d}:{secs:02d}"
+
+            sys.stdout.write(f"\r\x1b[K{label}")
             sys.stdout.flush()
-            time.sleep(1)
-    except KeyboardInterrupt:
-        handle_signal(None, None)
+
+            # Check for keypress (non-blocking)
+            if select.select([sys.stdin], [], [], 0.5)[0]:
+                key = sys.stdin.buffer.read1(4).decode("utf-8", errors="replace")
+                if key == " ":
+                    if state == "recording":
+                        engine.pause()
+                    elif state == "paused":
+                        engine.resume()
+                elif key.lower() in ("q", "й", "\x03"):
+                    stopping = True
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+    sys.stdout.write("\r\x1b[K")
+    print("Stopping recording...")
+    result = engine.stop()
+    PID_FILE.unlink(missing_ok=True)
+    _print_result(result)
 
 
 def cmd_stop(args: argparse.Namespace) -> None:

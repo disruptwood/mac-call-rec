@@ -1,4 +1,8 @@
-"""Recording engine — manages ffmpeg (mic) and ScreenCaptureKit (system audio) processes."""
+"""Recording engine — manages ffmpeg (mic) and ScreenCaptureKit (system audio) processes.
+
+Pause/resume uses segmented recording: each segment is a properly finalized file.
+If the computer crashes, all completed segments are safe.
+"""
 
 from __future__ import annotations
 
@@ -38,15 +42,25 @@ class Track:
 class RecordingSession:
     session_id: str
     started_at: datetime
+    output_dir: Path = field(default_factory=lambda: Path("."))
     tracks: list[Track] = field(default_factory=list)
     state: RecordingState = RecordingState.IDLE
     mixed_path: Path | None = None
+    segment_index: int = 0
+    # Each entry: list of segment file paths per track name
+    segments: dict[str, list[Path]] = field(default_factory=dict)
+    _paused_total: float = 0.0
+    _pause_started: datetime | None = None
 
     @property
     def duration_seconds(self) -> float:
         if self.state == RecordingState.IDLE:
             return 0.0
-        return (datetime.now() - self.started_at).total_seconds()
+        elapsed = (datetime.now() - self.started_at).total_seconds()
+        paused = self._paused_total
+        if self._pause_started:
+            paused += (datetime.now() - self._pause_started).total_seconds()
+        return elapsed - paused
 
 
 class RecordingEngine:
@@ -67,29 +81,10 @@ class RecordingEngine:
         self.session = RecordingSession(
             session_id=session_id,
             started_at=datetime.now(),
+            output_dir=output_dir,
         )
 
-        # Start mic recording (ffmpeg)
-        if self.audio.can_record_mic and self.audio.microphone:
-            mic_path = output_dir / f"mic.{self.config.format}"
-            proc = self._start_ffmpeg(self.audio.microphone, mic_path)
-            self.session.tracks.append(Track(
-                name="mic",
-                output_path=mic_path,
-                process=proc,
-                device_name=self.audio.microphone.name,
-            ))
-
-        # Start system audio recording (ScreenCaptureKit)
-        system_path = output_dir / "system.wav"
-        proc = self._start_system_capture(system_path)
-        if proc:
-            self.session.tracks.append(Track(
-                name="system",
-                output_path=system_path,
-                process=proc,
-                device_name="ScreenCaptureKit",
-            ))
+        self._start_segment()
 
         if not self.session.tracks:
             raise RuntimeError(
@@ -100,31 +95,43 @@ class RecordingEngine:
         self.session.state = RecordingState.RECORDING
         return self.session
 
-    def stop(self) -> RecordingSession:
+    def pause(self) -> None:
         if not self.session or self.session.state != RecordingState.RECORDING:
+            return
+
+        # Gracefully stop all processes — finalizes current segment files
+        self._stop_processes()
+        self.session._pause_started = datetime.now()
+        self.session.state = RecordingState.PAUSED
+
+    def resume(self) -> None:
+        if not self.session or self.session.state != RecordingState.PAUSED:
+            return
+
+        if self.session._pause_started:
+            self.session._paused_total += (datetime.now() - self.session._pause_started).total_seconds()
+            self.session._pause_started = None
+
+        # Start new segment
+        self._start_segment()
+        self.session.state = RecordingState.RECORDING
+
+    def stop(self) -> RecordingSession:
+        if not self.session or self.session.state not in (RecordingState.RECORDING, RecordingState.PAUSED):
             raise RuntimeError("No active recording to stop")
 
-        for track in self.session.tracks:
-            if track.process and track.process.poll() is None:
-                if track.name == "mic":
-                    # ffmpeg: send 'q' for graceful stop
-                    try:
-                        track.process.communicate(input=b"q", timeout=5)
-                    except subprocess.TimeoutExpired:
-                        track.process.send_signal(signal.SIGINT)
-                        try:
-                            track.process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            track.process.kill()
-                else:
-                    # System capture: SIGTERM for graceful stop
-                    track.process.send_signal(signal.SIGTERM)
-                    try:
-                        track.process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        track.process.kill()
+        if self.session.state == RecordingState.PAUSED:
+            # Already stopped processes on pause, just update pause time
+            if self.session._pause_started:
+                self.session._paused_total += (datetime.now() - self.session._pause_started).total_seconds()
+                self.session._pause_started = None
+        else:
+            self._stop_processes()
 
         self.session.state = RecordingState.STOPPED
+
+        # Concatenate segments into final files
+        self._concat_segments()
 
         # Echo cancellation: clean mic track when using speakers
         if self.audio.headphones_connected is False and len(self.session.tracks) > 1:
@@ -161,17 +168,124 @@ class RecordingEngine:
             "mixed_file": str(self.session.mixed_path) if self.session.mixed_path else None,
         }
 
+    # --- Segment management ---
+
+    def _start_segment(self) -> None:
+        """Start a new recording segment for all tracks."""
+        seg = self.session.segment_index
+        output_dir = self.session.output_dir
+        self.session.tracks.clear()
+
+        # Mic
+        if self.audio.can_record_mic and self.audio.microphone:
+            seg_path = output_dir / f"mic_seg{seg:03d}.{self.config.format}"
+            proc = self._start_ffmpeg(self.audio.microphone, seg_path)
+            self.session.tracks.append(Track(
+                name="mic",
+                output_path=seg_path,
+                process=proc,
+                device_name=self.audio.microphone.name,
+            ))
+            self.session.segments.setdefault("mic", []).append(seg_path)
+
+        # System audio
+        seg_path = output_dir / f"system_seg{seg:03d}.wav"
+        proc = self._start_system_capture(seg_path)
+        if proc:
+            self.session.tracks.append(Track(
+                name="system",
+                output_path=seg_path,
+                process=proc,
+                device_name="ScreenCaptureKit",
+            ))
+            self.session.segments.setdefault("system", []).append(seg_path)
+
+        self.session.segment_index += 1
+
+    def _stop_processes(self) -> None:
+        """Gracefully stop all running processes, finalizing their files."""
+        for track in self.session.tracks:
+            if track.process and track.process.poll() is None:
+                if track.name == "mic":
+                    try:
+                        track.process.communicate(input=b"q", timeout=5)
+                    except subprocess.TimeoutExpired:
+                        track.process.send_signal(signal.SIGINT)
+                        try:
+                            track.process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            track.process.kill()
+                else:
+                    track.process.send_signal(signal.SIGTERM)
+                    try:
+                        track.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        track.process.kill()
+
+    def _concat_segments(self) -> None:
+        """Concatenate segments into final track files."""
+        output_dir = self.session.output_dir
+
+        for track_name, seg_paths in self.session.segments.items():
+            # Filter to existing, non-empty files
+            valid = [p for p in seg_paths if p.exists() and p.stat().st_size > 0]
+
+            if not valid:
+                continue
+
+            ext = self.config.format if track_name == "mic" else "wav"
+            final_path = output_dir / f"{track_name}.{ext}"
+
+            if len(valid) == 1:
+                # Single segment — just rename
+                valid[0].rename(final_path)
+            else:
+                # Multiple segments — concatenate with ffmpeg
+                concat_list = output_dir / f"_{track_name}_concat.txt"
+                concat_list.write_text(
+                    "\n".join(f"file '{p.name}'" for p in valid)
+                )
+                cmd = [
+                    "ffmpeg",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(concat_list),
+                    "-c", "copy",
+                    "-y",
+                    str(final_path),
+                ]
+                try:
+                    subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    print(f"Warning: concat failed for {track_name}: {e}")
+                    # Keep segments as-is
+                    continue
+                finally:
+                    concat_list.unlink(missing_ok=True)
+
+                # Clean up segments
+                for p in valid:
+                    p.unlink(missing_ok=True)
+
+            # Update track to point to final file
+            for t in self.session.tracks:
+                if t.name == track_name:
+                    t.output_path = final_path
+
+    # --- Manifest ---
+
     def _write_manifest(self) -> None:
         """Write session metadata for downstream processing (Whisper, diarization)."""
         if not self.session or not self.session.tracks:
             return
 
-        session_dir = self.session.tracks[0].output_path.parent
+        session_dir = self.session.output_dir
         manifest = {
             "session_id": self.session.session_id,
             "started_at": self.session.started_at.isoformat(),
             "duration_seconds": round(self.session.duration_seconds, 1),
             "headphones_connected": self.audio.headphones_connected,
+            "segments_count": self.session.segment_index,
             "tracks": {},
         }
 
@@ -184,7 +298,6 @@ class RecordingEngine:
                 "size_bytes": size,
             }
 
-        # Track echo-cancelled mic if it exists
         mic_clean = session_dir / "mic_clean.wav"
         if mic_clean.exists():
             manifest["tracks"]["mic_clean"] = {
@@ -203,13 +316,10 @@ class RecordingEngine:
         manifest_path = session_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
 
-    def _echo_cancel(self) -> None:
-        """Remove speaker bleed from mic track using system track as reference.
+    # --- Echo cancellation ---
 
-        When no headphones are used, the mic picks up both the user's voice
-        and the speaker output. Since we have the clean system audio, we can
-        subtract it from the mic to isolate the user's voice.
-        """
+    def _echo_cancel(self) -> None:
+        """Remove speaker bleed from mic track using system track as reference."""
         mic_track = next((t for t in self.session.tracks if t.name == "mic"), None)
         sys_track = next((t for t in self.session.tracks if t.name == "system"), None)
 
@@ -220,8 +330,6 @@ class RecordingEngine:
 
         clean_path = mic_track.output_path.parent / "mic_clean.wav"
 
-        # Use ffmpeg's sidechaingate + invert-and-mix approach
-        # This inverts the system audio and mixes it with the mic to cancel echo
         cmd = [
             "ffmpeg",
             "-i", str(mic_track.output_path),
@@ -239,6 +347,8 @@ class RecordingEngine:
             print(f"Echo cancellation: {clean_path}")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             print(f"Warning: echo cancellation failed (non-fatal): {e}")
+
+    # --- Process launchers ---
 
     def _start_ffmpeg(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
         cmd = [
@@ -260,7 +370,6 @@ class RecordingEngine:
             stderr=subprocess.PIPE,
         )
 
-        # Brief check that ffmpeg started OK
         time.sleep(0.3)
         if proc.poll() is not None:
             _, stderr = proc.communicate()
@@ -298,6 +407,8 @@ class RecordingEngine:
 
         return proc
 
+    # --- Post-processing ---
+
     def _mix_tracks(self) -> None:
         if not self.session or len(self.session.tracks) < 2:
             return
@@ -307,11 +418,11 @@ class RecordingEngine:
             if track.output_path.exists() and track.output_path.stat().st_size > 0:
                 inputs.extend(["-i", str(track.output_path)])
 
-        if len(inputs) < 4:  # Need at least 2 inputs (2 args each)
+        if len(inputs) < 4:
             return
 
         n_inputs = len(inputs) // 2
-        mix_path = self.session.tracks[0].output_path.parent / f"mixed.{self.config.format}"
+        mix_path = self.session.output_dir / f"mixed.{self.config.format}"
 
         cmd = [
             "ffmpeg",
@@ -327,14 +438,13 @@ class RecordingEngine:
             subprocess.run(cmd, capture_output=True, timeout=120, check=True)
             self.session.mixed_path = mix_path
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            # Non-fatal: we still have individual tracks
             print(f"Warning: mixing failed: {e}")
 
     def _run_post_hooks(self) -> None:
         if not self.session or not self.config.post_hooks:
             return
 
-        session_dir = str(self.session.tracks[0].output_path.parent)
+        session_dir = str(self.session.output_dir)
         for hook in self.config.post_hooks:
             cmd = hook.replace("{session_dir}", session_dir)
             cmd = cmd.replace("{session_id}", self.session.session_id)
