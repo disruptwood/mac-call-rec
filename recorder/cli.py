@@ -38,13 +38,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         print("ERROR: No microphone detected.")
         sys.exit(1)
 
-    if not audio.blackhole_available:
-        print("WARNING: BlackHole not detected. Only microphone will be recorded.")
-        print("Run 'call-recorder setup' for instructions on capturing system audio.")
-    else:
-        print(f"System capture: {audio.system_capture.name}")
-
     print(f"Microphone: {audio.microphone.name}")
+    print(f"System audio: ScreenCaptureKit")
     if audio.headphones_connected:
         print("Headphones: detected")
 
@@ -57,7 +52,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         "session_id": session.session_id,
         "profile": profile_name,
         "tracks": [
-            {"name": t.name, "device_index": t.device.index, "device_name": t.device.name, "path": str(t.output_path)}
+            {"name": t.name, "device_name": t.device_name, "path": str(t.output_path)}
             for t in session.tracks
         ],
     }

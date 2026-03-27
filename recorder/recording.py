@@ -1,7 +1,8 @@
-"""Recording engine — manages ffmpeg processes for audio capture."""
+"""Recording engine — manages ffmpeg (mic) and ScreenCaptureKit (system audio) processes."""
 
 from __future__ import annotations
 
+import json
 import signal
 import subprocess
 import time
@@ -12,6 +13,9 @@ from pathlib import Path
 
 from .audio import AudioDevice, AudioSetup
 from .config import RecordingConfig
+
+# Compiled Swift binary for system audio capture via ScreenCaptureKit
+SYSTEM_CAPTURE_BINARY = Path(__file__).parent.parent / "scripts" / "capture_system_audio"
 
 
 class RecordingState(Enum):
@@ -25,9 +29,9 @@ class RecordingState(Enum):
 @dataclass
 class Track:
     name: str
-    device: AudioDevice
     output_path: Path
     process: subprocess.Popen | None = None
+    device_name: str = ""
 
 
 @dataclass
@@ -65,12 +69,33 @@ class RecordingEngine:
             started_at=datetime.now(),
         )
 
-        tracks_to_record = self._plan_tracks(output_dir)
+        # Start mic recording (ffmpeg)
+        if self.audio.can_record_mic and self.audio.microphone:
+            mic_path = output_dir / f"mic.{self.config.format}"
+            proc = self._start_ffmpeg(self.audio.microphone, mic_path)
+            self.session.tracks.append(Track(
+                name="mic",
+                output_path=mic_path,
+                process=proc,
+                device_name=self.audio.microphone.name,
+            ))
 
-        for track in tracks_to_record:
-            proc = self._start_ffmpeg(track.device, track.output_path)
-            track.process = proc
-            self.session.tracks.append(track)
+        # Start system audio recording (ScreenCaptureKit)
+        system_path = output_dir / "system.wav"
+        proc = self._start_system_capture(system_path)
+        if proc:
+            self.session.tracks.append(Track(
+                name="system",
+                output_path=system_path,
+                process=proc,
+                device_name="ScreenCaptureKit",
+            ))
+
+        if not self.session.tracks:
+            raise RuntimeError(
+                "No audio sources available for recording. "
+                "Check your microphone permissions."
+            )
 
         self.session.state = RecordingState.RECORDING
         return self.session
@@ -81,17 +106,31 @@ class RecordingEngine:
 
         for track in self.session.tracks:
             if track.process and track.process.poll() is None:
-                # Send 'q' to ffmpeg stdin for graceful stop
-                try:
-                    track.process.communicate(input=b"q", timeout=5)
-                except subprocess.TimeoutExpired:
-                    track.process.send_signal(signal.SIGINT)
+                if track.name == "mic":
+                    # ffmpeg: send 'q' for graceful stop
                     try:
-                        track.process.wait(timeout=5)
+                        track.process.communicate(input=b"q", timeout=5)
+                    except subprocess.TimeoutExpired:
+                        track.process.send_signal(signal.SIGINT)
+                        try:
+                            track.process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            track.process.kill()
+                else:
+                    # System capture: SIGTERM for graceful stop
+                    track.process.send_signal(signal.SIGTERM)
+                    try:
+                        track.process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         track.process.kill()
 
         self.session.state = RecordingState.STOPPED
+
+        # Echo cancellation: clean mic track when using speakers
+        if self.audio.headphones_connected is False and len(self.session.tracks) > 1:
+            self._echo_cancel()
+
+        self._write_manifest()
 
         if self.config.mix_tracks and len(self.session.tracks) > 1:
             self._mix_tracks()
@@ -109,7 +148,7 @@ class RecordingEngine:
             alive = t.process is not None and t.process.poll() is None
             alive_tracks.append({
                 "name": t.name,
-                "device": t.device.name,
+                "device": t.device_name,
                 "file": str(t.output_path),
                 "alive": alive,
             })
@@ -122,39 +161,84 @@ class RecordingEngine:
             "mixed_file": str(self.session.mixed_path) if self.session.mixed_path else None,
         }
 
-    def _plan_tracks(self, output_dir: Path) -> list[Track]:
-        tracks = []
-        ext = self.config.format
+    def _write_manifest(self) -> None:
+        """Write session metadata for downstream processing (Whisper, diarization)."""
+        if not self.session or not self.session.tracks:
+            return
 
-        if self.audio.can_record_mic and self.audio.microphone:
-            tracks.append(Track(
-                name="mic",
-                device=self.audio.microphone,
-                output_path=output_dir / f"mic.{ext}",
-            ))
+        session_dir = self.session.tracks[0].output_path.parent
+        manifest = {
+            "session_id": self.session.session_id,
+            "started_at": self.session.started_at.isoformat(),
+            "duration_seconds": round(self.session.duration_seconds, 1),
+            "headphones_connected": self.audio.headphones_connected,
+            "tracks": {},
+        }
 
-        if self.audio.can_record_system and self.audio.system_capture:
-            tracks.append(Track(
-                name="system",
-                device=self.audio.system_capture,
-                output_path=output_dir / f"system.{ext}",
-            ))
+        for track in self.session.tracks:
+            size = track.output_path.stat().st_size if track.output_path.exists() else 0
+            manifest["tracks"][track.name] = {
+                "file": track.output_path.name,
+                "device": track.device_name,
+                "role": "user" if track.name == "mic" else "remote",
+                "size_bytes": size,
+            }
 
-        if not tracks:
-            # Fallback: record whatever mic is available
-            if self.audio.microphone:
-                tracks.append(Track(
-                    name="mic",
-                    device=self.audio.microphone,
-                    output_path=output_dir / f"mic.{ext}",
-                ))
-            else:
-                raise RuntimeError(
-                    "No audio devices available for recording. "
-                    "Check your microphone and BlackHole setup."
-                )
+        # Track echo-cancelled mic if it exists
+        mic_clean = session_dir / "mic_clean.wav"
+        if mic_clean.exists():
+            manifest["tracks"]["mic_clean"] = {
+                "file": "mic_clean.wav",
+                "device": "echo-cancelled",
+                "role": "user",
+                "size_bytes": mic_clean.stat().st_size,
+            }
 
-        return tracks
+        if self.session.mixed_path and self.session.mixed_path.exists():
+            manifest["mixed"] = {
+                "file": self.session.mixed_path.name,
+                "size_bytes": self.session.mixed_path.stat().st_size,
+            }
+
+        manifest_path = session_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    def _echo_cancel(self) -> None:
+        """Remove speaker bleed from mic track using system track as reference.
+
+        When no headphones are used, the mic picks up both the user's voice
+        and the speaker output. Since we have the clean system audio, we can
+        subtract it from the mic to isolate the user's voice.
+        """
+        mic_track = next((t for t in self.session.tracks if t.name == "mic"), None)
+        sys_track = next((t for t in self.session.tracks if t.name == "system"), None)
+
+        if not mic_track or not sys_track:
+            return
+        if not mic_track.output_path.exists() or not sys_track.output_path.exists():
+            return
+
+        clean_path = mic_track.output_path.parent / "mic_clean.wav"
+
+        # Use ffmpeg's sidechaingate + invert-and-mix approach
+        # This inverts the system audio and mixes it with the mic to cancel echo
+        cmd = [
+            "ffmpeg",
+            "-i", str(mic_track.output_path),
+            "-i", str(sys_track.output_path),
+            "-filter_complex",
+            "[1:a]adelay=0|0,volume=0.8[ref];"
+            "[0:a][ref]amix=inputs=2:duration=first:weights=1 -1[out]",
+            "-map", "[out]",
+            "-y",
+            str(clean_path),
+        ]
+
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+            print(f"Echo cancellation: {clean_path}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            print(f"Warning: echo cancellation failed (non-fatal): {e}")
 
     def _start_ffmpeg(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
         cmd = [
@@ -184,6 +268,33 @@ class RecordingEngine:
                 f"ffmpeg failed to start recording from {device.name}: "
                 f"{stderr.decode(errors='replace')[-500:]}"
             )
+
+        return proc
+
+    def _start_system_capture(self, output_path: Path) -> subprocess.Popen | None:
+        binary = SYSTEM_CAPTURE_BINARY
+        if not binary.exists():
+            print(f"Warning: system audio capture binary not found at {binary}")
+            print("System audio will not be recorded.")
+            return None
+
+        cmd = [str(binary), str(output_path)]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            _, stderr = proc.communicate()
+            print(
+                f"Warning: system audio capture failed to start: "
+                f"{stderr.decode(errors='replace')[-500:]}"
+            )
+            return None
 
         return proc
 

@@ -38,6 +38,9 @@ env/
 # pytest
 .pytest_cache/
 
+# Compiled binaries
+scripts/capture_system_audio
+
 # quint-code local state
 .quint/
 .mcp.json

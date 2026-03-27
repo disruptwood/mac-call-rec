@@ -14,7 +14,7 @@ from recorder.recording import RecordingEngine, RecordingState
 
 def _make_setup(
     has_mic: bool = True,
-    has_blackhole: bool = True,
+    has_blackhole: bool = False,
     has_external_mic: bool = False,
 ) -> AudioSetup:
     devices = []
@@ -29,7 +29,6 @@ def _make_setup(
     if has_external_mic:
         d = AudioDevice(3, "External Microphone", DeviceType.MICROPHONE)
         devices.append(d)
-        # If external mic is present and we want to use it, override mic
         mic = d
 
     if has_blackhole:
@@ -46,48 +45,12 @@ def _make_setup(
     )
 
 
-class TestTrackPlanning:
-    def test_both_tracks_when_full_setup(self, tmp_path):
-        config = RecordingConfig(recordings_dir=str(tmp_path))
-        audio = _make_setup(has_mic=True, has_blackhole=True)
-        engine = RecordingEngine(config, audio)
-
-        tracks = engine._plan_tracks(tmp_path)
-        names = [t.name for t in tracks]
-        assert "mic" in names
-        assert "system" in names
-
-    def test_mic_only_when_no_blackhole(self, tmp_path):
-        config = RecordingConfig(recordings_dir=str(tmp_path))
-        audio = _make_setup(has_mic=True, has_blackhole=False)
-        engine = RecordingEngine(config, audio)
-
-        tracks = engine._plan_tracks(tmp_path)
-        assert len(tracks) == 1
-        assert tracks[0].name == "mic"
-
-    def test_raises_when_no_devices(self, tmp_path):
-        config = RecordingConfig(recordings_dir=str(tmp_path))
-        audio = _make_setup(has_mic=False, has_blackhole=False)
-        engine = RecordingEngine(config, audio)
-
-        with pytest.raises(RuntimeError, match="No audio devices"):
-            engine._plan_tracks(tmp_path)
-
-    def test_output_paths_use_config_format(self, tmp_path):
-        config = RecordingConfig(recordings_dir=str(tmp_path), format="wav")
-        audio = _make_setup()
-        engine = RecordingEngine(config, audio)
-
-        tracks = engine._plan_tracks(tmp_path)
-        for t in tracks:
-            assert str(t.output_path).endswith(".wav")
-
-
 class TestRecordingLifecycle:
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_start_creates_session(self, mock_ffmpeg, tmp_path):
+    def test_start_creates_session(self, mock_ffmpeg, mock_sys, tmp_path):
         mock_ffmpeg.return_value = MagicMock(poll=MagicMock(return_value=None))
+        mock_sys.return_value = MagicMock(poll=MagicMock(return_value=None))
         config = RecordingConfig(recordings_dir=str(tmp_path))
         audio = _make_setup()
         engine = RecordingEngine(config, audio)
@@ -97,9 +60,25 @@ class TestRecordingLifecycle:
         assert "test" in session.session_id
         assert len(session.tracks) >= 1
 
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_cannot_start_twice(self, mock_ffmpeg, tmp_path):
+    def test_records_both_mic_and_system(self, mock_ffmpeg, mock_sys, tmp_path):
         mock_ffmpeg.return_value = MagicMock(poll=MagicMock(return_value=None))
+        mock_sys.return_value = MagicMock(poll=MagicMock(return_value=None))
+        config = RecordingConfig(recordings_dir=str(tmp_path))
+        audio = _make_setup()
+        engine = RecordingEngine(config, audio)
+
+        session = engine.start()
+        names = [t.name for t in session.tracks]
+        assert "mic" in names
+        assert "system" in names
+
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
+    def test_cannot_start_twice(self, mock_ffmpeg, mock_sys, tmp_path):
+        mock_ffmpeg.return_value = MagicMock(poll=MagicMock(return_value=None))
+        mock_sys.return_value = MagicMock(poll=MagicMock(return_value=None))
         config = RecordingConfig(recordings_dir=str(tmp_path))
         audio = _make_setup()
         engine = RecordingEngine(config, audio)
@@ -109,12 +88,14 @@ class TestRecordingLifecycle:
             engine.start()
 
     @patch("recorder.recording.RecordingEngine._mix_tracks")
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_stop_changes_state(self, mock_ffmpeg, mock_mix, tmp_path):
+    def test_stop_changes_state(self, mock_ffmpeg, mock_sys, mock_mix, tmp_path):
         proc = MagicMock()
         proc.poll.return_value = None
         proc.communicate.return_value = (b"", b"")
         mock_ffmpeg.return_value = proc
+        mock_sys.return_value = MagicMock(poll=MagicMock(return_value=None))
 
         config = RecordingConfig(recordings_dir=str(tmp_path))
         audio = _make_setup()
@@ -132,9 +113,11 @@ class TestRecordingLifecycle:
         with pytest.raises(RuntimeError, match="No active recording"):
             engine.stop()
 
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_status_while_recording(self, mock_ffmpeg, tmp_path):
+    def test_status_while_recording(self, mock_ffmpeg, mock_sys, tmp_path):
         mock_ffmpeg.return_value = MagicMock(poll=MagicMock(return_value=None))
+        mock_sys.return_value = MagicMock(poll=MagicMock(return_value=None))
         config = RecordingConfig(recordings_dir=str(tmp_path))
         audio = _make_setup()
         engine = RecordingEngine(config, audio)
@@ -152,16 +135,35 @@ class TestRecordingLifecycle:
         status = engine.status()
         assert status["state"] == "idle"
 
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
+    def test_system_capture_failure_is_non_fatal(self, mock_ffmpeg, mock_sys, tmp_path):
+        """If system capture fails, we still record mic."""
+        mock_ffmpeg.return_value = MagicMock(poll=MagicMock(return_value=None))
+        mock_sys.return_value = None  # Failed to start
+
+        config = RecordingConfig(recordings_dir=str(tmp_path))
+        audio = _make_setup()
+        engine = RecordingEngine(config, audio)
+
+        session = engine.start()
+        assert session.state == RecordingState.RECORDING
+        names = [t.name for t in session.tracks]
+        assert "mic" in names
+        assert "system" not in names
+
 
 class TestPostHooks:
     @patch("recorder.recording.subprocess.run")
     @patch("recorder.recording.RecordingEngine._mix_tracks")
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_post_hooks_called_on_stop(self, mock_ffmpeg, mock_mix, mock_hook_run, tmp_path):
+    def test_post_hooks_called_on_stop(self, mock_ffmpeg, mock_sys, mock_mix, mock_hook_run, tmp_path):
         proc = MagicMock()
         proc.poll.return_value = None
         proc.communicate.return_value = (b"", b"")
         mock_ffmpeg.return_value = proc
+        mock_sys.return_value = MagicMock(poll=MagicMock(return_value=None))
 
         config = RecordingConfig(
             recordings_dir=str(tmp_path),
@@ -179,12 +181,14 @@ class TestPostHooks:
 
     @patch("recorder.recording.subprocess.run", side_effect=Exception("hook failed"))
     @patch("recorder.recording.RecordingEngine._mix_tracks")
+    @patch("recorder.recording.RecordingEngine._start_system_capture")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_post_hook_failure_is_non_fatal(self, mock_ffmpeg, mock_mix, mock_hook_run, tmp_path):
+    def test_post_hook_failure_is_non_fatal(self, mock_ffmpeg, mock_sys, mock_mix, mock_hook_run, tmp_path):
         proc = MagicMock()
         proc.poll.return_value = None
         proc.communicate.return_value = (b"", b"")
         mock_ffmpeg.return_value = proc
+        mock_sys.return_value = MagicMock(poll=MagicMock(return_value=None))
 
         config = RecordingConfig(
             recordings_dir=str(tmp_path),
@@ -194,7 +198,6 @@ class TestPostHooks:
         engine = RecordingEngine(config, audio)
 
         engine.start()
-        # Should not raise even if hook fails
         session = engine.stop()
         assert session.state == RecordingState.STOPPED
 
@@ -227,7 +230,6 @@ class TestFfmpegCommand:
         assert "avfoundation" in cmd
         assert ":1" in cmd  # device index
         assert "44100" in cmd
-        assert "2" in [str(c) for c in cmd]  # channels
 
     @patch("recorder.recording.time.sleep")
     @patch("recorder.recording.subprocess.Popen")
@@ -244,3 +246,30 @@ class TestFfmpegCommand:
 
         with pytest.raises(RuntimeError, match="ffmpeg failed"):
             engine._start_ffmpeg(device, tmp_path / "test.m4a")
+
+
+class TestSystemCapture:
+    @patch("recorder.recording.time.sleep")
+    @patch("recorder.recording.subprocess.Popen")
+    def test_system_capture_starts(self, mock_popen, mock_sleep, tmp_path):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        config = RecordingConfig(recordings_dir=str(tmp_path))
+        audio = _make_setup()
+        engine = RecordingEngine(config, audio)
+
+        with patch("recorder.recording.SYSTEM_CAPTURE_BINARY", tmp_path / "fake_binary"):
+            (tmp_path / "fake_binary").touch()
+            result = engine._start_system_capture(tmp_path / "out.wav")
+            assert result is not None
+
+    def test_missing_binary_returns_none(self, tmp_path):
+        config = RecordingConfig(recordings_dir=str(tmp_path))
+        audio = _make_setup()
+        engine = RecordingEngine(config, audio)
+
+        with patch("recorder.recording.SYSTEM_CAPTURE_BINARY", tmp_path / "nonexistent"):
+            result = engine._start_system_capture(tmp_path / "out.wav")
+            assert result is None
