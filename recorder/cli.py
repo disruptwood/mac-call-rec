@@ -242,12 +242,9 @@ def _print_result(session) -> None:
     mins, secs = divmod(int(duration), 60)
     hrs, mins = divmod(mins, 60)
     print(f"Duration: {hrs:02d}:{mins:02d}:{secs:02d}")
-    for t in session.tracks:
-        size = t.output_path.stat().st_size if t.output_path.exists() else 0
-        print(f"  {t.name}: {t.output_path} ({size / 1024:.1f} KB)")
-    if session.mixed_path and session.mixed_path.exists():
-        size = session.mixed_path.stat().st_size
-        print(f"  mixed: {session.mixed_path} ({size / 1024:.1f} KB)")
+    if session.recording_path and session.recording_path.exists():
+        size = session.recording_path.stat().st_size
+        print(f"Recording: {session.recording_path} ({size / 1024 / 1024:.1f} MB)")
 
 
 def main() -> None:
