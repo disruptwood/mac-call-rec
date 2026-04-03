@@ -7,9 +7,13 @@ import AVFoundation
 import Foundation
 import ScreenCaptureKit
 
+func log(_ msg: String) {
+    FileHandle.standardError.write(Data((msg + "\n").utf8))
+}
+
 guard CommandLine.arguments.count >= 2 else {
-    print("Usage: capture_system_audio <output.wav> [duration_seconds]")
-    print("  If duration is omitted, records until killed (Ctrl+C or SIGTERM)")
+    log("Usage: capture_system_audio <output.wav> [duration_seconds]")
+    log("  If duration is omitted, records until killed (Ctrl+C or SIGTERM)")
     exit(1)
 }
 
@@ -35,7 +39,7 @@ class AudioRecorder: NSObject, SCStreamOutput {
     func start() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else {
-            print("ERROR: No display found")
+            log("ERROR: No display found")
             exit(1)
         }
 
@@ -75,7 +79,7 @@ class AudioRecorder: NSObject, SCStreamOutput {
         try stream!.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         try await stream!.startCapture()
         isRecording = true
-        print("Recording system audio to: \(outputURL.path)")
+        log("Recording system audio to: \(outputURL.path)")
     }
 
     func stop() async {
@@ -84,10 +88,10 @@ class AudioRecorder: NSObject, SCStreamOutput {
         try? await stream?.stopCapture()
         audioInput?.markAsFinished()
         await fileWriter?.finishWriting()
-        print("Total audio samples: \(sampleCount)")
-        print("Saved: \(outputURL.path)")
+        log("Total audio samples: \(sampleCount)")
+        log("Saved: \(outputURL.path)")
         let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int) ?? 0
-        print("Size: \(size / 1024) KB")
+        log("Size: \(size / 1024) KB")
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -98,7 +102,7 @@ class AudioRecorder: NSObject, SCStreamOutput {
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             fileWriter?.startSession(atSourceTime: pts)
             sessionStarted = true
-            print("First audio sample received (pts: \(CMTimeGetSeconds(pts)))")
+            log("First audio sample received (pts: \(CMTimeGetSeconds(pts)))")
         }
 
         sampleCount += 1
@@ -133,19 +137,19 @@ Task {
         try await recorder.start()
 
         if let dur = duration {
-            print("Recording for \(Int(dur)) seconds...")
+            log("Recording for \(Int(dur)) seconds...")
             try await Task.sleep(nanoseconds: UInt64(dur * 1_000_000_000))
         } else {
-            print("Recording until interrupted (Ctrl+C)...")
+            log("Recording until interrupted (Ctrl+C)...")
             while !shouldStop {
                 try await Task.sleep(nanoseconds: 100_000_000) // 100ms
             }
         }
 
-        print("\nStopping...")
+        log("\nStopping...")
         await recorder.stop()
     } catch {
-        print("Error: \(error)")
+        log("Error: \(error)")
     }
     semaphore.signal()
 }
