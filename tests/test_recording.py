@@ -34,9 +34,10 @@ def _mock_proc():
 
 class TestRecordingLifecycle:
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_start_creates_session(self, mock_ffmpeg, mock_sys, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_start_creates_session(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         session = engine.start(label="test")
@@ -44,9 +45,10 @@ class TestRecordingLifecycle:
         assert "test" in session.session_id
 
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_records_mic_and_system(self, mock_ffmpeg, mock_sys, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_records_mic_and_system(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         session = engine.start()
@@ -55,9 +57,10 @@ class TestRecordingLifecycle:
         assert "system" in names
 
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_cannot_start_twice(self, mock_ffmpeg, mock_sys, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_cannot_start_twice(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -66,9 +69,10 @@ class TestRecordingLifecycle:
 
     @patch("recorder.recording.RecordingEngine._normalize_and_mix")
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_stop_changes_state(self, mock_ffmpeg, mock_sys, mock_mix, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_stop_changes_state(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, mock_mix, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -81,9 +85,10 @@ class TestRecordingLifecycle:
             engine.stop()
 
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_status_while_recording(self, mock_ffmpeg, mock_sys, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_status_while_recording(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -94,9 +99,10 @@ class TestRecordingLifecycle:
         assert engine.status()["state"] == "idle"
 
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_system_failure_still_records_mic(self, mock_ffmpeg, mock_sys, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_system_failure_still_records_mic(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = None
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         session = engine.start()
@@ -107,9 +113,10 @@ class TestRecordingLifecycle:
 
 class TestPauseResume:
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_pause_and_resume(self, mock_ffmpeg, mock_sys, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_pause_and_resume(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -121,9 +128,10 @@ class TestPauseResume:
 
     @patch("recorder.recording.RecordingEngine._normalize_and_mix")
     @patch("recorder.recording.RecordingEngine._start_system_capture")
+    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
     @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_stop_from_paused(self, mock_ffmpeg, mock_sys, mock_mix, tmp_path):
-        mock_ffmpeg.return_value = _mock_proc()
+    def test_stop_from_paused(self, mock_ffmpeg, mock_ffmpeg_wav, mock_sys, mock_mix, tmp_path):
+        mock_ffmpeg_wav.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()

@@ -168,8 +168,9 @@ class RecordingEngine:
         self.session.tracks.clear()
 
         if self.audio.can_record_mic and self.audio.microphone:
-            seg_path = output_dir / f"_mic_seg{seg:03d}.{self.config.format}"
-            proc = self._start_ffmpeg(self.audio.microphone, seg_path)
+            # WAV for mic: readable while file is growing (needed for live transcription)
+            seg_path = output_dir / f"_mic_seg{seg:03d}.wav"
+            proc = self._start_ffmpeg_wav(self.audio.microphone, seg_path)
             self.session.tracks.append(Track(
                 name="mic", output_path=seg_path, process=proc,
                 device_name=self.audio.microphone.name,
@@ -215,7 +216,7 @@ class RecordingEngine:
             if not valid:
                 continue
 
-            ext = self.config.format if track_name == "mic" else "wav"
+            ext = "wav"  # Both mic and system are WAV
             final_path = output_dir / f"_{track_name}.{ext}"
 
             if len(valid) == 1:
@@ -305,6 +306,24 @@ class RecordingEngine:
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
 
     # --- Process launchers ---
+
+    def _start_ffmpeg_wav(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
+        """Record mic as WAV (PCM int16) — readable while file is growing."""
+        cmd = [
+            "ffmpeg",
+            "-f", "avfoundation",
+            "-i", f":{device.index}",
+            "-ar", str(self.config.sample_rate),
+            "-ac", str(self.config.channels),
+            "-c:a", "pcm_s16le",
+            "-y", str(output_path),
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.3)
+        if proc.poll() is not None:
+            _, stderr = proc.communicate()
+            raise RuntimeError(f"ffmpeg failed: {stderr.decode(errors='replace')[-500:]}")
+        return proc
 
     def _start_ffmpeg(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
         cmd = [
