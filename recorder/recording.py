@@ -85,6 +85,12 @@ class RecordingEngine:
             output_dir=output_dir,
         )
 
+        # Boost mic input for recording (macOS default may be 50%)
+        # Save current level to restore after
+        r = subprocess.run(["osascript", "-e", "input volume of (get volume settings)"], capture_output=True, text=True)
+        self._original_input_volume = r.stdout.strip()
+        subprocess.run(["osascript", "-e", "set volume input volume 85"], capture_output=True)
+
         self._start_segment()
 
         if not self.session.tracks:
@@ -121,6 +127,10 @@ class RecordingEngine:
             self._stop_processes()
 
         self.session.state = RecordingState.STOPPED
+
+        # Restore original mic input volume
+        if hasattr(self, '_original_input_volume') and self._original_input_volume:
+            subprocess.run(["osascript", "-e", f"set volume input volume {self._original_input_volume}"], capture_output=True)
 
         self._concat_segments()
         self._normalize_and_mix()

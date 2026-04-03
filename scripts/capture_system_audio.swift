@@ -24,9 +24,11 @@ class AudioRecorder: NSObject, SCStreamOutput {
     var sessionStarted = false
     var sampleCount = 0
     let outputURL: URL
+    let pipePCM: Bool  // Write raw PCM (int16 mono 16kHz) to stdout
 
-    init(outputURL: URL) {
+    init(outputURL: URL, pipePCM: Bool = false) {
         self.outputURL = outputURL
+        self.pipePCM = pipePCM
         super.init()
     }
 
@@ -101,10 +103,23 @@ class AudioRecorder: NSObject, SCStreamOutput {
 
         sampleCount += 1
         audioInput.append(sampleBuffer)
+
+        // Write raw PCM to stdout for streaming transcription
+        if pipePCM {
+            if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                let length = CMBlockBufferGetDataLength(blockBuffer)
+                var data = Data(count: length)
+                data.withUnsafeMutableBytes { ptr in
+                    CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: ptr.baseAddress!)
+                }
+                FileHandle.standardOutput.write(data)
+            }
+        }
     }
 }
 
-let recorder = AudioRecorder(outputURL: URL(fileURLWithPath: outputPath))
+let pipePCM = CommandLine.arguments.contains("--pipe")
+let recorder = AudioRecorder(outputURL: URL(fileURLWithPath: outputPath), pipePCM: pipePCM)
 let semaphore = DispatchSemaphore(value: 0)
 
 // Handle SIGINT/SIGTERM for graceful stop

@@ -5,7 +5,7 @@ Pipeline:
   1. Silero VAD on mic and system tracks → speaker timestamps
   2. Qwen3-ASR on mixed recording → text with chunk timestamps
   3. Overlay VAD speaker labels on transcription chunks
-  4. Output markdown with Я/Собеседница labels
+  4. Output markdown with Я/Собеседни:ца labels
 
 Usage:
     python3 transcribe.py <session_dir> [--lang Russian] [--note "..."]
@@ -79,7 +79,7 @@ def assign_speakers(chunks: list[dict], mic_stamps: list, sys_stamps: list) -> l
         if mic_ov > sys_ov and mic_ov > 0.1:
             chunk["speaker"] = "Я"
         elif sys_ov > 0.1:
-            chunk["speaker"] = "Собеседница"
+            chunk["speaker"] = "Собеседни:ца"
         else:
             chunk["speaker"] = None
     # Fill gaps with previous speaker
@@ -139,8 +139,10 @@ def main():
         print(f"ERROR: No manifest.json in {session_dir}")
         sys.exit(1)
 
+    t_total = time.time()
     manifest = json.loads(manifest_path.read_text())
-    print(f"Session: {manifest.get('session_id', '?')}", flush=True)
+    audio_duration = manifest.get("duration_seconds", 0)
+    print(f"Session: {manifest.get('session_id', '?')} ({audio_duration:.0f}s audio)", flush=True)
     print(f"Model: {args.model}", flush=True)
 
     # Find files
@@ -190,7 +192,9 @@ def main():
 
     output_path = session_dir / "transcript.md"
     output_path.write_text(md, encoding="utf-8")
+    total = time.time() - t_total
     print(f"\nTranscript: {output_path}", flush=True)
+    print(f"Total: {total:.1f}s for {audio_duration:.0f}s audio ({audio_duration/total:.1f}x real-time)", flush=True)
 
     # Preview
     for line in md.split("\n")[:20]:
