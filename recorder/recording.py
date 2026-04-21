@@ -308,7 +308,13 @@ class RecordingEngine:
     # --- Process launchers ---
 
     def _start_ffmpeg_wav(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
-        """Record mic as WAV (PCM int16) — readable while file is growing."""
+        """Record mic as WAV (PCM int16) — readable while file is growing.
+
+        ffmpeg stderr (progress + format detection) is redirected to a .ffmpeg.log
+        file. This both captures diagnostics and prevents the stderr pipe buffer
+        from filling up over long sessions (which can block ffmpeg and cause
+        sample drops).
+        """
         cmd = [
             "ffmpeg",
             "-f", "avfoundation",
@@ -318,11 +324,14 @@ class RecordingEngine:
             "-c:a", "pcm_s16le",
             "-y", str(output_path),
         ]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        log_path = output_path.with_suffix(output_path.suffix + ".ffmpeg.log")
+        log_file = open(log_path, "wb")
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=log_file, stderr=log_file)
         time.sleep(0.3)
         if proc.poll() is not None:
-            _, stderr = proc.communicate()
-            raise RuntimeError(f"ffmpeg failed: {stderr.decode(errors='replace')[-500:]}")
+            log_file.close()
+            tail = log_path.read_bytes()[-500:] if log_path.exists() else b""
+            raise RuntimeError(f"ffmpeg failed: {tail.decode(errors='replace')}")
         return proc
 
     def _start_ffmpeg(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
@@ -336,23 +345,30 @@ class RecordingEngine:
             "-b:a", self.config.bitrate,
             "-y", str(output_path),
         ]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        log_path = output_path.with_suffix(output_path.suffix + ".ffmpeg.log")
+        log_file = open(log_path, "wb")
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=log_file, stderr=log_file)
         time.sleep(0.3)
         if proc.poll() is not None:
-            _, stderr = proc.communicate()
-            raise RuntimeError(f"ffmpeg failed: {stderr.decode(errors='replace')[-500:]}")
+            log_file.close()
+            tail = log_path.read_bytes()[-500:] if log_path.exists() else b""
+            raise RuntimeError(f"ffmpeg failed: {tail.decode(errors='replace')}")
         return proc
 
     def _start_system_capture(self, output_path: Path) -> subprocess.Popen | None:
+        """Start ScreenCaptureKit system audio capture, log stderr to file."""
         binary = SYSTEM_CAPTURE_BINARY
         if not binary.exists():
             print(f"Warning: system audio capture binary not found at {binary}")
             return None
         cmd = [str(binary), str(output_path)]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        log_path = output_path.with_suffix(output_path.suffix + ".capture.log")
+        log_file = open(log_path, "wb")
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=log_file, stderr=log_file)
         time.sleep(0.5)
         if proc.poll() is not None:
-            _, stderr = proc.communicate()
-            print(f"Warning: system audio capture failed: {stderr.decode(errors='replace')[-500:]}")
+            log_file.close()
+            tail = log_path.read_bytes()[-500:] if log_path.exists() else b""
+            print(f"Warning: system audio capture failed: {tail.decode(errors='replace')}")
             return None
         return proc

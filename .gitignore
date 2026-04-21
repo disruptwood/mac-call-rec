@@ -45,3 +45,6 @@ scripts/capture_system_audio
 .quint/
 .mcp.json
 system.txt
+
+# Claude Code local settings
+.claude/
