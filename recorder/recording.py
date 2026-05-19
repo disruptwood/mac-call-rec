@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +24,7 @@ from .audio import AudioDevice, AudioSetup
 from .config import RecordingConfig
 
 SYSTEM_CAPTURE_BINARY = Path(__file__).parent.parent / "scripts" / "capture_system_audio"
+MIC_PA_SCRIPT = Path(__file__).parent.parent / "scripts" / "capture_mic_pa.py"
 
 
 class RecordingState(Enum):
@@ -176,6 +178,21 @@ class RecordingEngine:
                 device_name=self.audio.microphone.name,
             ))
             self.session.segments.setdefault("mic", []).append(seg_path)
+
+            # Parallel A/B mic capture via PortAudio (CoreAudio HAL, bypasses VPIO).
+            # Written to _mic_pa.wav alongside the ffmpeg _mic.wav for drift comparison;
+            # not mixed into recording.m4a. Soft-fail: if PortAudio cannot start
+            # (missing dep, permissions, device busy), we keep the ffmpeg track.
+            pa_seg_path = output_dir / f"_mic_pa_seg{seg:03d}.wav"
+            pa_proc = self._start_mic_pa_capture(
+                pa_seg_path, device_name=self.audio.microphone.name,
+            )
+            if pa_proc:
+                self.session.tracks.append(Track(
+                    name="mic_pa", output_path=pa_seg_path, process=pa_proc,
+                    device_name=f"PortAudio: {self.audio.microphone.name}",
+                ))
+                self.session.segments.setdefault("mic_pa", []).append(pa_seg_path)
 
         seg_path = output_dir / f"_system_seg{seg:03d}.wav"
         proc = self._start_system_capture(seg_path)
@@ -376,5 +393,37 @@ class RecordingEngine:
             log_file.close()
             tail = log_path.read_bytes()[-500:] if log_path.exists() else b""
             print(f"Warning: system audio capture failed: {tail.decode(errors='replace')}")
+            return None
+        return proc
+
+    def _start_mic_pa_capture(
+        self, output_path: Path, device_name: str | None = None,
+    ) -> subprocess.Popen | None:
+        """Start PortAudio mic capture (parallel A/B against ffmpeg avfoundation).
+
+        Spawns scripts/capture_mic_pa.py using the same interpreter that runs the
+        recorder (sys.executable). Logs stderr (PortAudio + soundfile diagnostics)
+        to a .pa.log file. Soft-fail: returns None if the script is missing or the
+        process dies in the first ~300 ms (e.g. sounddevice not installed in this
+        env). The ffmpeg mic track continues unaffected.
+
+        device_name is matched by sounddevice as a substring against all input
+        devices — passing the same name that AVFoundation picked ensures both
+        tracks read from the same physical device.
+        """
+        if not MIC_PA_SCRIPT.exists():
+            return None
+        cmd = [sys.executable, str(MIC_PA_SCRIPT), str(output_path)]
+        if device_name:
+            cmd.extend(["--device", device_name])
+        log_path = output_path.with_suffix(output_path.suffix + ".pa.log")
+        log_file = open(log_path, "wb")
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=log_file, stderr=log_file)
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            log_file.close()
+            tail = log_path.read_bytes()[-500:] if log_path.exists() else b""
+            print(f"Warning: PortAudio mic capture failed (ffmpeg mic continues): "
+                  f"{tail.decode(errors='replace')}")
             return None
         return proc

@@ -149,12 +149,15 @@ def main():
 
     # Check files
     mic = session_dir / "_mic.wav"
+    mic_pa = session_dir / "_mic_pa.wav"
     sys_f = session_dir / "_system.wav"
     rec = session_dir / "recording.m4a"
 
     results = {}
-    for name, path in [("mic", mic), ("system", sys_f), ("recording.m4a", rec)]:
+    for name, path in [("mic", mic), ("mic_pa", mic_pa), ("system", sys_f), ("recording.m4a", rec)]:
         if not path.exists():
+            if name == "mic_pa":
+                continue  # mic_pa is opt-in A/B track, missing is fine
             print(f"{name:16s} — MISSING")
             continue
         data = probe(path)
@@ -168,20 +171,41 @@ def main():
         results[name] = dur
 
     # Drift analysis
-    if "mic" in results and "system" in results:
-        mic_dur, sys_dur = results["mic"], results["system"]
-        drift_pct = abs(mic_dur - sys_dur) / max(mic_dur, sys_dur) * 100
-        ratio = mic_dur / sys_dur
-        print(f"\nmic/system ratio: {ratio:.3f}")
-        print(f"Drift: {drift_pct:.1f}%")
+    def _drift_report(track_name: str, track_dur: float, sys_dur: float) -> None:
+        drift_pct = abs(track_dur - sys_dur) / max(track_dur, sys_dur) * 100
+        ratio = track_dur / sys_dur
+        print(f"\n{track_name}/system ratio: {ratio:.3f}")
+        print(f"{track_name} drift vs system: {drift_pct:.1f}%")
         if drift_pct < 2:
-            print("✓ Tracks are SYNCHRONIZED — recording was healthy")
+            print(f"✓ {track_name} is SYNCHRONIZED with system")
         elif drift_pct < 5:
-            print("? MARGINAL drift")
+            print(f"? {track_name} has MARGINAL drift")
         else:
-            print("✗ DESYNC — known sync bug triggered")
-            effective_rate = mic_dur / sys_dur * 48000
-            print(f"  Effective mic sample rate: ~{effective_rate:.0f} Hz (expected 48000)")
+            print(f"✗ {track_name} DESYNC — sync bug triggered on this track")
+            effective_rate = track_dur / sys_dur * 48000
+            print(f"  Effective {track_name} sample rate: ~{effective_rate:.0f} Hz (expected 48000)")
+
+    if "mic" in results and "system" in results:
+        _drift_report("mic", results["mic"], results["system"])
+
+    if "mic_pa" in results and "system" in results:
+        _drift_report("mic_pa", results["mic_pa"], results["system"])
+
+    # Side-by-side verdict for the A/B test
+    if "mic" in results and "mic_pa" in results and "system" in results:
+        mic_drift = abs(results["mic"] - results["system"]) / max(results["mic"], results["system"]) * 100
+        pa_drift = abs(results["mic_pa"] - results["system"]) / max(results["mic_pa"], results["system"]) * 100
+        print("\n--- A/B verdict (ffmpeg avfoundation vs PortAudio) ---")
+        print(f"  ffmpeg   _mic.wav    drift: {mic_drift:.2f}%")
+        print(f"  PortAudio _mic_pa.wav drift: {pa_drift:.2f}%")
+        if pa_drift < 2 and mic_drift >= 5:
+            print("  ✓ PortAudio path is CLEAN, ffmpeg path is broken — switch over.")
+        elif pa_drift < mic_drift - 1:
+            print(f"  PortAudio is better by {mic_drift - pa_drift:.1f}pp, but not yet clean.")
+        elif abs(pa_drift - mic_drift) < 0.5:
+            print("  Both tracks behave the same — VPIO may not be active, or bypass failed.")
+        else:
+            print("  ⚠ PortAudio is NOT better. Investigate before relying on it.")
 
     # ffmpeg logs — check both post-concat name and segment name (logs are written
     # with segment name before concat; concat renames the .wav but leaves the .log)
@@ -218,6 +242,33 @@ def main():
                 if mismatch_pct >= 2:
                     print(f"  ⚠ WAV sample duration differs from ffmpeg timestamps by {mismatch_pct:.1f}%")
                     print("    Mic capture needs timestamp-gap compensation (aresample=async).")
+
+    # PortAudio mic log (if A/B track was recorded)
+    if mic_pa.exists():
+        print("\n--- capture_mic_pa log (_mic_pa.wav.pa.log) ---")
+        pa_log, pa_segment_log = first_existing_log(
+            session_dir, "_mic_pa.wav.pa.log", "_mic_pa_seg*.wav.pa.log",
+        )
+        if pa_segment_log:
+            print(f"  (using segment log: {pa_segment_log})")
+        if not pa_log.exists():
+            print("  No PortAudio log found — script may have crashed before logging")
+        else:
+            content = pa_log.read_text(errors="replace")
+            lines = content.splitlines()
+            print(f"  Log size: {pa_log.stat().st_size} bytes")
+            if lines:
+                # Show header (device info) and tail (final drift report)
+                for line in lines[:8]:
+                    print(f"    {line}")
+                if len(lines) > 16:
+                    print("    ...")
+                for line in lines[-8:]:
+                    print(f"    {line}")
+            # Highlight any status events (overflows etc.)
+            status_lines = [l for l in lines if "Status events" in l or "Stream error" in l]
+            for sl in status_lines:
+                print(f"  ⚠ {sl}")
 
     # Capture log
     print("\n--- capture_system_audio log (_system.wav.capture.log) ---")
