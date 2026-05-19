@@ -65,10 +65,20 @@ def parse_ffmpeg_input_format(log_path: Path) -> str:
     if not log_path.exists():
         return "log missing"
     content = log_path.read_text(errors="replace")
-    for line in content.splitlines()[:50]:
-        m = re.search(r"Audio:\s*(.+)$", line)
-        if m:
-            return m.group(1).strip()
+    in_input_section = False
+    for line in content.splitlines()[:80]:
+        if line.startswith("Input #0"):
+            in_input_section = True
+            m = re.search(r"Audio:\s*(.+)$", line)
+            if m:
+                return m.group(1).strip()
+            continue
+        if line.startswith("Stream mapping:") or line.startswith("Output #0"):
+            in_input_section = False
+        if in_input_section:
+            m = re.search(r"^\s*Stream #0.*?Audio:\s*(.+)$", line)
+            if m:
+                return m.group(1).strip()
     return "format line not found"
 
 
@@ -109,6 +119,7 @@ def main():
         "ffmpeg",
         "-f", "avfoundation",
         "-i", f":{mic_idx}",
+        "-af", "aresample=async=1:first_pts=0",
         "-ar", "48000",
         "-ac", "1",
         "-c:a", "pcm_s16le",

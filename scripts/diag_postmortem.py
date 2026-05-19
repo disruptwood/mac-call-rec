@@ -23,6 +23,17 @@ import sys
 from pathlib import Path
 
 
+def parse_timecode(value: str) -> float | None:
+    """Parse an ffmpeg HH:MM:SS.xx timecode into seconds."""
+    m = re.fullmatch(r"(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)", value)
+    if not m:
+        return None
+    hours = int(m.group(1) or 0)
+    minutes = int(m.group(2))
+    seconds = float(m.group(3))
+    return hours * 3600 + minutes * 60 + seconds
+
+
 def probe(path: Path) -> dict:
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries",
@@ -53,15 +64,40 @@ def analyze_ffmpeg_log(log_path: Path) -> dict:
     content = log_path.read_text(errors="replace")
     info = {"present": True, "size": log_path.stat().st_size}
 
-    # Input format line
-    for line in content.splitlines()[:100]:
-        m = re.search(r"Input #0.*?Audio:\s*(.+)$", line)
-        if m:
-            info["input_format"] = m.group(1).strip()
-            break
-        m = re.search(r"^\s*Stream #0.*?Audio:\s*(.+)$", line)
-        if m:
-            info["input_format"] = m.group(1).strip()
+    # Input format line. ffmpeg also prints output stream lines with the same
+    # "Stream #0" shape, so only accept stream lines while inside the input
+    # section.
+    in_input_section = False
+    for line in content.splitlines()[:120]:
+        if line.startswith("Input #0"):
+            in_input_section = True
+            m = re.search(r"Audio:\s*(.+)$", line)
+            if m:
+                info["input_format"] = m.group(1).strip()
+                break
+            continue
+        if line.startswith("Stream mapping:") or line.startswith("Output #0"):
+            in_input_section = False
+        if in_input_section:
+            m = re.search(r"^\s*Stream #0.*?Audio:\s*(.+)$", line)
+            if m:
+                info["input_format"] = m.group(1).strip()
+                break
+
+    times = []
+    elapsed_times = []
+    for m in re.finditer(r"\btime=(\d+:\d{2}:\d{2}(?:\.\d+)?)", content):
+        parsed = parse_timecode(m.group(1))
+        if parsed is not None:
+            times.append(parsed)
+    for m in re.finditer(r"\belapsed=(\d+:\d{2}:\d{2}(?:\.\d+)?)", content):
+        parsed = parse_timecode(m.group(1))
+        if parsed is not None:
+            elapsed_times.append(parsed)
+    if times:
+        info["ffmpeg_time_seconds"] = times[-1]
+    if elapsed_times:
+        info["ffmpeg_elapsed_seconds"] = elapsed_times[-1]
 
     # Warnings / errors
     warnings = []
@@ -76,6 +112,18 @@ def analyze_ffmpeg_log(log_path: Path) -> dict:
     # Final output stats (last N lines)
     info["tail"] = "\n".join(content.splitlines()[-20:])
     return info
+
+
+def first_existing_log(session_dir: Path, final_name: str, segment_glob: str) -> tuple[Path, str | None]:
+    final_log = session_dir / final_name
+    if final_log.exists():
+        return final_log, None
+
+    seg_logs = sorted(session_dir.glob(segment_glob))
+    if seg_logs:
+        return seg_logs[0], seg_logs[0].name
+
+    return final_log, None
 
 
 def main():
@@ -135,9 +183,14 @@ def main():
             effective_rate = mic_dur / sys_dur * 48000
             print(f"  Effective mic sample rate: ~{effective_rate:.0f} Hz (expected 48000)")
 
-    # ffmpeg logs
+    # ffmpeg logs — check both post-concat name and segment name (logs are written
+    # with segment name before concat; concat renames the .wav but leaves the .log)
     print("\n--- ffmpeg log (_mic.wav.ffmpeg.log) ---")
-    mic_log = session_dir / "_mic.wav.ffmpeg.log"
+    mic_log, mic_segment_log = first_existing_log(
+        session_dir, "_mic.wav.ffmpeg.log", "_mic_seg*.wav.ffmpeg.log",
+    )
+    if mic_segment_log:
+        print(f"  (using segment log: {mic_segment_log})")
     info = analyze_ffmpeg_log(mic_log)
     if not info["present"]:
         print("  Log not present — session was recorded with OLD version of recording.py")
@@ -156,10 +209,23 @@ def main():
             print(f"  Warnings/errors ({len(info['warnings'])}):")
             for w in info["warnings"][:10]:
                 print(f"    {w}")
+        if "ffmpeg_time_seconds" in info:
+            print(f"  ffmpeg timestamp duration: {fmt_duration(info['ffmpeg_time_seconds'])}")
+            if "mic" in results:
+                sample_dur = results["mic"]
+                ts_dur = info["ffmpeg_time_seconds"]
+                mismatch_pct = abs(ts_dur - sample_dur) / max(ts_dur, sample_dur) * 100
+                if mismatch_pct >= 2:
+                    print(f"  ⚠ WAV sample duration differs from ffmpeg timestamps by {mismatch_pct:.1f}%")
+                    print("    Mic capture needs timestamp-gap compensation (aresample=async).")
 
     # Capture log
     print("\n--- capture_system_audio log (_system.wav.capture.log) ---")
-    sys_log = session_dir / "_system.wav.capture.log"
+    sys_log, sys_segment_log = first_existing_log(
+        session_dir, "_system.wav.capture.log", "_system_seg*.wav.capture.log",
+    )
+    if sys_segment_log:
+        print(f"  (using segment log: {sys_segment_log})")
     if not sys_log.exists():
         print("  Log not present — recorded with OLD version; next session will have it")
     else:

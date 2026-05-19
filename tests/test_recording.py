@@ -9,7 +9,7 @@ import pytest
 
 from recorder.audio import AudioDevice, AudioSetup, DeviceType
 from recorder.config import RecordingConfig
-from recorder.recording import RecordingEngine, RecordingState
+from recorder.recording import RecordingEngine, RecordingSession, RecordingState, Track
 
 
 def _make_setup(has_mic: bool = True) -> AudioSetup:
@@ -152,7 +152,19 @@ class TestFfmpegCommand:
         assert "ffmpeg" in cmd[0]
         assert "avfoundation" in cmd
         assert ":1" in cmd
+        assert "aresample=async=1:first_pts=0" in cmd
         assert "44100" in cmd
+
+    @patch("recorder.recording.time.sleep")
+    @patch("recorder.recording.subprocess.Popen")
+    def test_ffmpeg_wav_uses_timestamp_gap_compensation(self, mock_popen, mock_sleep, tmp_path):
+        mock_popen.return_value = _mock_proc()
+        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
+        device = AudioDevice(1, "MacBook Air Microphone", DeviceType.MICROPHONE)
+        engine._start_ffmpeg_wav(device, tmp_path / "test.wav")
+        cmd = mock_popen.call_args[0][0]
+        assert "-af" in cmd
+        assert "aresample=async=1:first_pts=0" in cmd
 
     @patch("recorder.recording.time.sleep")
     @patch("recorder.recording.subprocess.Popen")
@@ -180,3 +192,31 @@ class TestSystemCapture:
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         with patch("recorder.recording.SYSTEM_CAPTURE_BINARY", tmp_path / "nonexistent"):
             assert engine._start_system_capture(tmp_path / "out.wav") is None
+
+
+class TestMixing:
+    @patch("recorder.recording.subprocess.run")
+    def test_mixed_recording_forces_configured_sample_rate_and_channels(self, mock_run, tmp_path):
+        mic = tmp_path / "_mic.wav"
+        sys_f = tmp_path / "_system.wav"
+        mic.write_bytes(b"mic")
+        sys_f.write_bytes(b"sys")
+
+        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
+        engine.session = RecordingSession(
+            session_id="test",
+            started_at=MagicMock(),
+            output_dir=tmp_path,
+            tracks=[
+                Track(name="mic", output_path=mic),
+                Track(name="system", output_path=sys_f),
+            ],
+        )
+
+        engine._normalize_and_mix()
+
+        cmd = mock_run.call_args[0][0]
+        assert "-ar" in cmd
+        assert cmd[cmd.index("-ar") + 1] == "48000"
+        assert "-ac" in cmd
+        assert cmd[cmd.index("-ac") + 1] == "1"

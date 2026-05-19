@@ -31,7 +31,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-QWEN_MODEL = "/Users/ilya/models/qwen3-asr-1.7b"
+WHISPER_MODEL = "mlx-community/whisper-large-v3-mlx"  # downloaded on first use to HF cache
 EMBEDDING_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
 SPEAKERS_DIR = Path.home() / ".call-recorder" / "speakers"
 
@@ -269,68 +269,84 @@ def assign_word_speakers(
     return out
 
 
-def transcribe_asr(mixed_path: str, language: str, model: str) -> dict:
-    """Run Qwen3-ASR with word-level timestamps. No diarize, no context (avoid leaks).
+def transcribe_asr(
+    audio_path: str, language: str, model: str,
+    condition_on_previous_text: bool = False,
+    initial_prompt: str | None = None,
+) -> dict:
+    """Run mlx-whisper (large-v3) with word-level timestamps.
 
-    Returns dict with 'text', 'words' (word-level), 'chunks' (chunk-level).
+    mlx-whisper downloads the model to HF cache on first use.
+    Returns dict with 'text', 'words' (word-level), 'language'.
+
+    condition_on_previous_text: if True, each 30-sec window uses previous
+        output as context. Better coherence but can cause repetition loops
+        on silence. Default False (safer).
+    initial_prompt: optional seed text for the first window. NOT included
+        in output text (Whisper strips prompt tokens before returning).
+        Useful for biasing toward proper names and domain vocabulary.
     """
-    from mlx_qwen3_asr import Session
+    import mlx_whisper
 
-    session = Session(model=model)
+    # mlx-whisper uses ISO 639-1 codes: "ru" not "Russian"
+    lang_map = {"Russian": "ru", "English": "en"}
+    lang_code = lang_map.get(language, language.lower()[:2])
 
+    print(f"  Loading model {model} (first use downloads ~3 GB)...", flush=True)
+    print(f"  condition_on_previous_text={condition_on_previous_text}, "
+          f"initial_prompt={'yes (' + str(len(initial_prompt)) + ' chars)' if initial_prompt else 'no'}",
+          flush=True)
     t0 = time.time()
-    last_print = [t0]
 
-    def on_progress(info):
-        if time.time() - last_print[0] < 2.0:
-            return
-        last_print[0] = time.time()
-        try:
-            d = info.__dict__ if hasattr(info, "__dict__") else dict(info) if isinstance(info, dict) else {}
-            parts = []
-            for k, v in list(d.items())[:4]:
-                if isinstance(v, float):
-                    parts.append(f"{k}={v:.2f}")
-                elif isinstance(v, (int, str, bool)):
-                    parts.append(f"{k}={v}")
-            elapsed = time.time() - t0
-            print(f"  [{elapsed:6.1f}s] {' '.join(parts)}", flush=True)
-        except Exception:
-            pass
-
-    result = session.transcribe(
-        mixed_path,
-        language=language,
-        return_timestamps=True,
-        return_chunks=True,
+    kwargs = dict(
+        path_or_hf_repo=model,
+        language=lang_code,
+        word_timestamps=True,
+        condition_on_previous_text=condition_on_previous_text,
         verbose=False,
-        on_progress=on_progress,
     )
+    if initial_prompt:
+        kwargs["initial_prompt"] = initial_prompt
 
-    # Extract words with timestamps
+    result = mlx_whisper.transcribe(audio_path, **kwargs)
+
+    elapsed = time.time() - t0
+    print(f"  ASR done: {elapsed:.1f}s", flush=True)
+
+    # Extract words with timestamps. mlx-whisper segments have optional 'words' list.
     words = []
-    if hasattr(result, "segments") and result.segments:
-        for seg in result.segments:
-            if "text" in seg and "start" in seg:
+    segments = result.get("segments", []) if isinstance(result, dict) else []
+    for seg in segments:
+        seg_words = seg.get("words", [])
+        if seg_words:
+            for w in seg_words:
+                text = str(w.get("word", "")).strip()
+                if text:
+                    words.append({
+                        "text": text,
+                        "start": float(w.get("start", 0)),
+                        "end": float(w.get("end", w.get("start", 0))),
+                    })
+        else:
+            # Fallback: segment-level only
+            text = str(seg.get("text", "")).strip()
+            if text:
                 words.append({
-                    "text": str(seg["text"]).strip(),
-                    "start": float(seg["start"]),
-                    "end": float(seg.get("end", seg["start"])),
+                    "text": text,
+                    "start": float(seg.get("start", 0)),
+                    "end": float(seg.get("end", seg.get("start", 0))),
                 })
 
-    # Fallback: use chunks if no word-level
-    if not words and hasattr(result, "chunks") and result.chunks:
-        print("  WARNING: no word-level timestamps, using chunks", flush=True)
-        for c in result.chunks:
-            words.append({
-                "text": str(c.get("text", "")).strip(),
-                "start": float(c.get("start", 0)),
-                "end": float(c.get("end", c.get("start", 0) + 1)),
-            })
+    # Last resort: use overall text
+    if not words:
+        full_text = result.get("text", "").strip() if isinstance(result, dict) else ""
+        if full_text:
+            print("  WARNING: no segments, using full text as single span", flush=True)
+            words.append({"text": full_text, "start": 0.0, "end": 0.0})
 
     return {
-        "text": result.text or "",
-        "language": result.language,
+        "text": result.get("text", "") if isinstance(result, dict) else "",
+        "language": result.get("language", language) if isinstance(result, dict) else language,
         "words": words,
     }
 

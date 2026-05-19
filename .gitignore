@@ -17,6 +17,11 @@ recordings/
 # Config with personal settings
 config.json
 
+# API keys and secrets
+.env
+.env.local
+.env.*.local
+
 # Runtime state
 active.pid
 
@@ -40,6 +45,9 @@ env/
 
 # Compiled binaries
 scripts/capture_system_audio
+
+# Temporary/experimental scripts
+scripts/temp_*.py
 
 # quint-code local state
 .quint/

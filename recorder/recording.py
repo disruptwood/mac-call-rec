@@ -259,6 +259,8 @@ class RecordingEngine:
                 "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[mic];"
                 "[mic][1:a]amix=inputs=2:duration=longest[out]",
                 "-map", "[out]",
+                "-ar", str(self.config.sample_rate),
+                "-ac", str(self.config.channels),
                 "-c:a", self.config.codec, "-b:a", self.config.bitrate,
                 "-y", str(recording_path),
             ]
@@ -271,6 +273,8 @@ class RecordingEngine:
         elif sys_track and sys_track.output_path.exists():
             cmd = [
                 "ffmpeg", "-i", str(sys_track.output_path),
+                "-ar", str(self.config.sample_rate),
+                "-ac", str(self.config.channels),
                 "-c:a", self.config.codec, "-b:a", self.config.bitrate,
                 "-y", str(recording_path),
             ]
@@ -319,6 +323,7 @@ class RecordingEngine:
             "ffmpeg",
             "-f", "avfoundation",
             "-i", f":{device.index}",
+            "-af", "aresample=async=1:first_pts=0",
             "-ar", str(self.config.sample_rate),
             "-ac", str(self.config.channels),
             "-c:a", "pcm_s16le",
@@ -339,6 +344,7 @@ class RecordingEngine:
             "ffmpeg",
             "-f", "avfoundation",
             "-i", f":{device.index}",
+            "-af", "aresample=async=1:first_pts=0",
             "-ar", str(self.config.sample_rate),
             "-ac", str(self.config.channels),
             "-c:a", self.config.codec,

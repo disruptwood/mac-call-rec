@@ -43,11 +43,17 @@ def patched_main():
     parser = argparse.ArgumentParser(description="ONE-SHOT: transcribe from _mic.wav")
     parser.add_argument("session_dir")
     parser.add_argument("--lang", default="Russian")
-    parser.add_argument("--model", default=transcribe.QWEN_MODEL)
+    parser.add_argument("--model", default=transcribe.WHISPER_MODEL)
     parser.add_argument("--note", default=None)
     parser.add_argument("--speakers-dir", default=str(transcribe.SPEAKERS_DIR))
     parser.add_argument("--speakers", default=None)
     parser.add_argument("--smooth-radius", type=int, default=1)
+    parser.add_argument("--condition-on-previous", action="store_true",
+                        help="Enable Whisper self-conditioning across 30-sec windows "
+                             "(better coherence, risk of repetition loops)")
+    parser.add_argument("--initial-prompt", default=None,
+                        help="Seed text for Whisper's first window (biases toward "
+                             "names/terms; NOT echoed in output)")
     args = parser.parse_args()
 
     session_dir = Path(args.session_dir)
@@ -89,9 +95,13 @@ def patched_main():
     t_total = time.time()
 
     # Step 1: ASR
-    print(f"\n1/5 Transcribing _mic.wav with Qwen3-ASR...", flush=True)
+    print(f"\n1/5 Transcribing _mic.wav with mlx-whisper...", flush=True)
     t = time.time()
-    asr = transcribe.transcribe_asr(str(mic_path), args.lang, args.model)
+    asr = transcribe.transcribe_asr(
+        str(mic_path), args.lang, args.model,
+        condition_on_previous_text=args.condition_on_previous,
+        initial_prompt=args.initial_prompt,
+    )
     print(f"    Done: {time.time() - t:.1f}s, {len(asr['words'])} words", flush=True)
 
     # Step 2: VAD
@@ -141,10 +151,10 @@ def patched_main():
     speakers_used = sorted(coverage.keys(), key=lambda n: -coverage[n])
 
     md = transcribe.format_markdown(utterances, note, started_at, audio_duration, speakers_used, coverage)
-    out_md = session_dir / "transcript_mic.md"
+    out_md = session_dir / "transcript_mic_whisper.md"
     out_md.write_text(md, encoding="utf-8")
 
-    out_json = session_dir / "transcript_mic.json"
+    out_json = session_dir / "transcript_mic_whisper.json"
     raw = {
         "note": "ONE-SHOT from _mic.wav; mic timebase != real time (see project memory)",
         "audio_file": str(mic_path.name),
