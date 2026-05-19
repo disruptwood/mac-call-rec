@@ -163,7 +163,14 @@ def main():
         data = probe(path)
         stream = data.get("streams", [{}])[0] if data.get("streams") else {}
         fmt = data.get("format", {})
-        dur = float(fmt.get("duration", stream.get("duration", 0)))
+        raw_dur = fmt.get("duration", stream.get("duration", 0))
+        try:
+            dur = float(raw_dur)
+        except (TypeError, ValueError):
+            # ffprobe returns "N/A" for corrupt/unfinished WAVs (broken RIFF
+            # header from SIGKILL'd writer, etc.).
+            print(f"{name:16s} — duration unreadable (raw={raw_dur!r}); skipping in drift calc")
+            continue
         sr = stream.get("sample_rate", "?")
         ch = stream.get("channels", "?")
         codec = stream.get("codec_name", "?")
@@ -172,6 +179,11 @@ def main():
 
     # Drift analysis
     def _drift_report(track_name: str, track_dur: float, sys_dur: float) -> None:
+        if track_dur <= 0 or sys_dur <= 0:
+            print(f"\n{track_name}/system: one or both durations are zero "
+                  f"({track_name}={track_dur:.2f}s, system={sys_dur:.2f}s) — "
+                  f"likely a capture crash at session start.")
+            return
         drift_pct = abs(track_dur - sys_dur) / max(track_dur, sys_dur) * 100
         ratio = track_dur / sys_dur
         print(f"\n{track_name}/system ratio: {ratio:.3f}")
@@ -185,6 +197,11 @@ def main():
             effective_rate = track_dur / sys_dur * 48000
             print(f"  Effective {track_name} sample rate: ~{effective_rate:.0f} Hz (expected 48000)")
 
+    def _safe_drift(a: float, b: float) -> float | None:
+        if a <= 0 or b <= 0:
+            return None
+        return abs(a - b) / max(a, b) * 100
+
     if "mic" in results and "system" in results:
         _drift_report("mic", results["mic"], results["system"])
 
@@ -193,19 +210,25 @@ def main():
 
     # Side-by-side verdict for the A/B test
     if "mic" in results and "mic_pa" in results and "system" in results:
-        mic_drift = abs(results["mic"] - results["system"]) / max(results["mic"], results["system"]) * 100
-        pa_drift = abs(results["mic_pa"] - results["system"]) / max(results["mic_pa"], results["system"]) * 100
+        mic_drift = _safe_drift(results["mic"], results["system"])
+        pa_drift = _safe_drift(results["mic_pa"], results["system"])
         print("\n--- A/B verdict (ffmpeg avfoundation vs PortAudio) ---")
-        print(f"  ffmpeg   _mic.wav    drift: {mic_drift:.2f}%")
-        print(f"  PortAudio _mic_pa.wav drift: {pa_drift:.2f}%")
-        if pa_drift < 2 and mic_drift >= 5:
-            print("  ✓ PortAudio path is CLEAN, ffmpeg path is broken — switch over.")
-        elif pa_drift < mic_drift - 1:
-            print(f"  PortAudio is better by {mic_drift - pa_drift:.1f}pp, but not yet clean.")
-        elif abs(pa_drift - mic_drift) < 0.5:
-            print("  Both tracks behave the same — VPIO may not be active, or bypass failed.")
+        if mic_drift is None or pa_drift is None:
+            print(f"  Cannot compare — durations: mic={results['mic']:.1f}s, "
+                  f"mic_pa={results['mic_pa']:.1f}s, system={results['system']:.1f}s. "
+                  f"Likely a capture crash. Check the *.log files for errors.")
         else:
-            print("  ⚠ PortAudio is NOT better. Investigate before relying on it.")
+            print(f"  ffmpeg   _mic.wav    drift: {mic_drift:.2f}%")
+            print(f"  PortAudio _mic_pa.wav drift: {pa_drift:.2f}%")
+            if pa_drift < 2 and mic_drift >= 2:
+                # PortAudio is clean and ffmpeg is at least marginally broken.
+                print("  ✓ PortAudio path is CLEAN, ffmpeg path is drifting — switch over.")
+            elif pa_drift < mic_drift - 1:
+                print(f"  PortAudio is better by {mic_drift - pa_drift:.1f}pp, but not yet clean.")
+            elif abs(pa_drift - mic_drift) < 0.5:
+                print("  Both tracks behave the same — VPIO may not be active, or bypass failed.")
+            else:
+                print("  ⚠ PortAudio is NOT better. Investigate before relying on it.")
 
     # ffmpeg logs — check both post-concat name and segment name (logs are written
     # with segment name before concat; concat renames the .wav but leaves the .log)

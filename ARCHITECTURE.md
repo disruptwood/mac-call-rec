@@ -1,108 +1,148 @@
-## Архитектура call-recorder
+# Архитектура call-recorder
 
-### Что это
+## Что это
 
-CLI для записи обеих сторон голосовых звонков на macOS с автоматической транскрипцией и разделением реплик.
+CLI для записи обеих сторон голосовых звонков на macOS. Запись + диагностика
+делается локально; транскрипция отправляется в Gemini (или локально, если есть
+желание — см. ниже).
 
-### Запись
+## Запись
 
-```
-python3 -m recorder start -l "therapy"
-  ├─ ffmpeg (AVFoundation) → _mic.wav      [твой голос, PCM int16 mono 48kHz]
-  └─ capture_system_audio  → _system.wav   [голос собеседника, ScreenCaptureKit]
-
-При остановке (q):
-  ├─ mic громкость нормализуется (loudnorm -16 LUFS)
-  ├─ mic + system → recording.m4a          [микс для прослушивания]
-  ├─ _mic.wav и _system.wav сохраняются    [для VAD-разметки спикеров]
-  └─ manifest.json                          [метаданные сессии]
-```
-
-**Критические инварианты записи:**
-- Mic и system записываются непрерывно, без ротации/сегментации
-- Ротация сегментов ЗАПРЕЩЕНА — вызывает дрифт между дорожками (см. dec-20260403-001)
-- Исходные файлы (_mic, _system) НИКОГДА не удаляются автоматически
-- При паузе/resume: сегменты финализируются и склеиваются
-
-**Громкость микрофона:**
-- При старте записи: macOS input volume → 85% (был 50%, давал -42 dB)
-- При остановке: восстанавливается оригинальное значение
-- В mixed: mic нормализуется через loudnorm, system остаётся как есть
-
-### Транскрипция (batch, после записи)
+Параллельно стартуют **три** capture-процесса при `python3 -m recorder start`:
 
 ```
-scripts/transcribe.py <session_dir>
-  1. Silero VAD на _mic.wav → таймкоды "Я"           [~0.6 сек]
-  2. Silero VAD на _system.wav → таймкоды "Собеседни:ца"  [~0.6 сек]
-  3. Qwen3-ASR 1.7B на recording.m4a → текст + чанки  [1.6x real-time]
-  4. Наложение VAD-таймкодов → speaker labels
-  5. → transcript.md
+mic (ffmpeg avfoundation)        → _mic.wav        [ffmpeg, WAV PCM s16le mono 48kHz]
+mic (PortAudio sounddevice)      → _mic_pa.wav     [sounddevice, WAV PCM s16le mono 48kHz]
+system (Swift ScreenCaptureKit)  → _system.wav     [WAV PCM s16le stereo 48kHz]
 ```
 
-**Почему так:**
-- Один прогон Qwen3-ASR по mixed (не два по раздельным трекам) — быстрее
-- VAD мгновенный (~0.3 сек на 60 сек аудио) — даёт 100% точные speaker labels по источнику
-- pyannote не используется — слишком медленный (3 мин на 30 сек аудио)
-- VAD не работает на музыке — это ожидаемо, только на речи
+При остановке (`q`):
+- Микс mic + system через ffmpeg loudnorm + amix → `recording.m4a`
+- Source-треки (`_mic.wav`, `_mic_pa.wav`, `_system.wav`) НЕ удаляются
+- `manifest.json` пишет длительность, время старта, состояние наушников
 
-### Транскрипция (streaming, в разработке)
+### Почему два mic-трека параллельно
 
-Текущий статус: **не работает**. Попытка читать растущие WAV файлы провалилась (галлюцинации на тишине).
+Под активным WebRTC-звонком в браузере CoreAudio переводит mic-устройство
+в VPIO-режим (Voice Processing I/O), который иногда тихо не доставляет frames.
+ffmpeg avfoundation ходит через AudioUnit и ловит эту VPIO-просадку →
+`_mic.wav` отстаёт от wall-clock на 15-18%.
 
-Правильная архитектура (из ресёрча RealtimeSTT, WhisperLive):
+PortAudio (через `sounddevice`) ходит в CoreAudio HAL **напрямую**
+(`AudioDeviceCreateIOProcID`), минуя все AudioUnit'ы включая VPIO.
+`_mic_pa.wav` должен оставаться синхронным с wall-clock независимо
+от состояния браузерного WebRTC.
+
+Пока что в `recording.m4a` идёт старый `_mic.wav` — после подтверждения
+что PortAudio чистый на реальной сессии, в `_build_normalize_mix_cmd`
+переключим на `_mic_pa.wav` и удалим ffmpeg-mic путь.
+
+### Наушники — observability, не feature
+
+`detect_headphones()` находит наушники один раз на старте, записывает
+в manifest, и печатает WARN если их нет. **Логика записи на состояние
+наушников не ветвится**, mid-session отключение наушников игнорируется.
+
+Рекомендация: наушники включены → mic ловит только тебя, system ловит
+собеседника, два чистых раздельных трека. Без наушников → mic ловит
+обоих (bleed из колонок), хуже разделение.
+
+## Транскрипция
+
+**Основной путь — Gemini 3 Flash (cloud):**
+
 ```
-mic (sounddevice)        → PCM 16kHz → Silero VAD gate → feed_audio → "Я: ..."
-system (capture --pipe)  → PCM 16kHz → Silero VAD gate → feed_audio → "Собеседни:ца: ..."
+recording.m4a → scripts/transcribe_gemini.py → transcript_<stem>_gemini_<model>.md
 ```
-Ключевое: **VAD как gate перед моделью** — тишина не подаётся в Qwen3-ASR, предотвращает галлюцинации.
 
-### Стек технологий
+Скрипт делает upload в Files API, ждёт ACTIVE, шлёт промпт с просьбой
+сделать диаризацию по таймкодам. Все safety-filters установлены в
+BLOCK_NONE (терапия попадает в фильтры по умолчанию).
 
-| Компонент | Технология | Где |
-|-----------|-----------|-----|
-| Запись mic | ffmpeg + AVFoundation | recorder/recording.py |
-| Запись system | Swift + ScreenCaptureKit | scripts/capture_system_audio.swift |
-| Транскрипция | Qwen3-ASR 1.7B (MLX, GPU) | scripts/transcribe.py |
-| VAD | Silero VAD (torch) | scripts/transcribe.py |
-| Speaker labels | По источнику (mic/system) через VAD-таймкоды | scripts/transcribe.py |
-| CLI | Python argparse + raw terminal | recorder/cli.py |
+Требует `GEMINI_API_KEY` в `.env` (gitignored).
 
-### Модели и окружения
+**Локальный путь (fallback, не основной):**
 
-| Что | Где | Размер |
-|-----|-----|--------|
-| Qwen3-ASR 1.7B | ~/models/qwen3-asr-1.7b | ~3.4 GB |
-| Whisper large-v3 (legacy) | ~/models/whisper-large-v3 | ~3 GB |
-| Whisper Hebrew (legacy) | ~/models/whisper-he | ~1.5 GB |
-| Silero VAD | ~/.cache/torch/hub/ | ~2 MB |
-| qwen-asr-env | ~/qwen-asr-env | Python 3.14 |
-| whisper-env (legacy) | ~/whisper-env | Python 3.12 |
+`scripts/transcribe.py` + `scripts/enroll_speakers.py` — mlx-whisper +
+pyannote + enrolled speaker embeddings. Сохранён в репо на случай если
+понадобится оффлайн или если Gemini будет не подходить. Запускается
+вручную; в основной recording-pipeline не интегрирован.
 
-### Файлы сессии
+`scripts/diag_diarize.py`, `scripts/oneshot_transcribe_mic.py`,
+`scripts/live_stream_transcribe.py` — экспериментальные / legacy, не
+поддерживаются, не запускаются автоматически.
+
+## Диагностика
+
+После каждой сессии:
+```
+python3 scripts/diag_postmortem.py ~/.call-recorder/recordings/<session>
+```
+Покажет:
+- Длительность каждого трека vs wall-clock
+- A/B drift verdict (`_mic.wav` vs `_mic_pa.wav` vs `_system.wav`)
+- Что ffmpeg видел на входе (формат, частота)
+- Status events PortAudio (overflows и т.п.)
+
+`diag_preflight.py` — быстрая проверка mic/system синхронизации ДО
+сессии (~10 сек запись).
+
+## Файлы сессии
 
 ```
 ~/.call-recorder/recordings/<label>_<YYYYMMDD_HHMMSS>/
-  _mic.wav            ← твой голос (PCM, НЕ УДАЛЯТЬ)
-  _system.wav         ← голос собеседника (PCM, НЕ УДАЛЯТЬ)
-  recording.m4a       ← нормализованный микс для прослушивания
-  manifest.json       ← метаданные, длительность, устройства
-  transcript.md       ← транскрипт с Я/Собеседни:ца метками
+  _mic.wav                ← ffmpeg avfoundation mic (VPIO-affected)
+  _mic.wav.ffmpeg.log     ← ffmpeg stderr (диагностика)
+  _mic_pa.wav             ← PortAudio mic (HAL bypass, проверяем)
+  _mic_pa.wav.pa.log      ← PortAudio diagnostic
+  _system.wav             ← ScreenCaptureKit system audio
+  _system.wav.capture.log ← Swift binary stderr
+  recording.m4a           ← loudnorm + amix микс для прослушивания
+  manifest.json           ← session_id, длительность, наушники, recording size
+  transcript_*.md         ← (опционально) после запуска transcribe_gemini.py
 ```
 
-### Известные проблемы
+## Структура кода
 
-1. **VAD misattribution**: крупные чанки Qwen3-ASR (12-34 сек) могут содержать речь обоих — VAD назначает спикера по преобладающему overlap, граница нечёткая
-2. **Mic тихий при WebRTC**: браузер может дополнительно снижать gain сверх наших 85%
-3. **Формат аудио**: system.wav = ~700 MB/час (несжатый), можно оптимизировать
-4. **ScreenCaptureKit exclusive access**: только один процесс может захватывать
-5. **Streaming не реализован**: batch-режим 1.6x real-time, streaming требует VAD-gated pipeline
+```
+recorder/
+  __main__.py        ← python3 -m recorder
+  cli.py             ← argparse subcommands: start, stop, status, devices, setup, config
+  recording.py       ← RecordingEngine: lifecycle, segment management, ffmpeg/PA/Swift launch
+  audio.py           ← AudioDevice/AudioSetup detection, headphone detection
+  config.py          ← RecordingConfig, AudioProfile
+  setup_helper.py    ← ffmpeg presence check, setup instructions print
 
-### Правила разработки
+scripts/
+  capture_system_audio.swift  ← компилируется в capture_system_audio binary
+  capture_mic_pa.py           ← PortAudio mic recorder (standalone subprocess)
+  transcribe_gemini.py        ← Gemini transcription (основной)
+  transcribe.py               ← mlx-whisper transcription (fallback, не интегрировано)
+  enroll_speakers.py          ← enrollment для local pipeline (fallback)
+  diag_postmortem.py          ← post-session drift analysis
+  diag_preflight.py           ← pre-session quick sync check
+  diag_diarize.py             ← (legacy)
+  oneshot_transcribe_mic.py   ← (legacy)
+  live_stream_transcribe.py   ← (legacy)
 
-- **E2e тест перед реальной сессией** — запись 1 мин, проверить audio + transcript + labels
-- **Никогда rm** — только mv в ~/.Trash/
-- **Тесты не должны спавнить тяжёлые процессы** — mock _start_ffmpeg_wav, _start_system_capture
-- **После pytest: проверить ps aux** на утечки
-- **Длинные процессы** — давать команду пользователю, не запускать в фоне
-- **Тестировать от малого к большому** — сначала токены/permissions, потом компоненты, потом pipeline
+tests/                ← pytest, 63 теста, все процессы мокаются
+  test_recording.py   ← lifecycle, ffmpeg cmd, PA capture, volume mgmt, mixing
+  test_audio.py       ← device detection
+  test_config.py      ← config + profiles
+  test_setup_helper.py
+  test_diag_postmortem.py
+```
+
+## Правила разработки
+
+1. **Дорожки не разъезжаются** — никакой ротации/сегментации в активной
+   записи кроме pause/resume. Сегменты склеиваются на остановке.
+2. **Source-треки не удаляются автоматически** — `_mic.wav`, `_mic_pa.wav`,
+   `_system.wav` нужны для диагностики и re-транскрипции.
+3. **Никаких реальных subprocess в тестах.** Volume mgmt через osascript,
+   ffmpeg, Swift binary, PortAudio Python — ВСЕ мокаются. См. шапку
+   `tests/test_recording.py` со списком обязательных моков.
+4. **Длинные процессы — командой пользователю**, не запускать в фоне из
+   Claude. Запись/транскрипция идут минутами/часами.
+5. **E2e smoke test перед каждой реальной сессией** — 60 сек запись с
+   активным WebRTC в браузере + `diag_postmortem.py`.

@@ -86,7 +86,6 @@ class TestRecordingConfig:
             "name": "studio",
             "description": "Studio mic setup",
             "preferred_mic": "Blue Yeti",
-            "preferred_system_capture": "BlackHole",
         }
         profile = config.get_profile("studio")
         assert profile.preferred_mic == "Blue Yeti"
@@ -97,7 +96,6 @@ class TestRecordingConfig:
             "name": "studio",
             "description": "Studio",
             "preferred_mic": "Blue Yeti",
-            "preferred_system_capture": "BlackHole",
         }
         profiles = config.list_profiles()
         names = [p.name for p in profiles]
@@ -110,17 +108,3 @@ class TestRecordingConfig:
         config = RecordingConfig(recordings_dir=str(tmp_path / "recs"))
         output = config.output_dir
         assert output.exists()
-
-    def test_post_hooks_default_empty(self):
-        config = RecordingConfig()
-        assert config.post_hooks == []
-
-    def test_post_hooks_persist(self, tmp_path):
-        config_path = tmp_path / "config.json"
-        config = RecordingConfig()
-        config.post_hooks = ["echo done", "python3 transcribe.py {session_dir}"]
-        config.save(config_path)
-
-        loaded = RecordingConfig.load(config_path)
-        assert len(loaded.post_hooks) == 2
-        assert "transcribe" in loaded.post_hooks[1]

@@ -17,7 +17,6 @@ from .audio import detect_audio_setup
 from .config import RecordingConfig
 from .recording import RecordingEngine
 from .setup_helper import (
-    check_blackhole_loaded,
     check_ffmpeg_installed,
     print_setup_instructions,
 )
@@ -161,15 +160,10 @@ def cmd_devices(args: argparse.Namespace) -> None:
     audio = detect_audio_setup()
     print("Detected audio devices:\n")
     for d in audio.all_devices:
-        marker = ""
-        if d.is_builtin_mic:
-            marker = " [default mic]"
-        elif d.is_blackhole:
-            marker = " [system capture]"
+        marker = " [default mic]" if d.is_builtin_mic else ""
         print(f"  [{d.index}] {d.name} ({d.device_type.value}){marker}")
-
     print(f"\nHeadphones connected: {'yes' if audio.headphones_connected else 'no'}")
-    print(f"BlackHole available: {'yes' if audio.blackhole_available else 'no'}")
+    print("System audio capture: ScreenCaptureKit (no virtual device needed)")
 
 
 def cmd_profiles(args: argparse.Namespace) -> None:
@@ -203,16 +197,8 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
     print("ffmpeg: OK")
 
-    if check_blackhole_loaded():
-        print("BlackHole: OK (visible to ffmpeg)")
-    else:
-        print("BlackHole: NOT detected by ffmpeg")
-        print("Try: sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod")
-        print()
-
     audio = detect_audio_setup()
-    headphones = audio.headphones_connected
-    print_setup_instructions(headphones)
+    print_setup_instructions(audio.headphones_connected)
 
 
 def cmd_config(args: argparse.Namespace) -> None:

@@ -1,12 +1,44 @@
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "call-recorder"
-version = "0.1.0"
+version = "0.2.0"
 description = "Record both sides of a voice call on macOS"
 requires-python = ">=3.11"
+dependencies = [
+    # Recording (PortAudio A/B mic track)
+    "sounddevice>=0.5",
+    "soundfile>=0.13",
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+# Cloud transcription via Gemini (primary path post-recording).
+gemini = [
+    "google-genai>=0.8.0",
+    "python-dotenv>=1.0.0",
+]
+# Local ASR fallback. Kept available but not the default path.
+# Heavy; install only if you want offline transcription with speaker IDs.
+local-asr = [
+    "torch>=2.0",
+    "mlx-whisper>=0.4",
+    "pyannote.audio>=3.0",
+    "silero-vad>=4.0",
+    "wespeaker-unofficial>=0.1",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
 
 [project.scripts]
 call-recorder = "recorder.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["recorder*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

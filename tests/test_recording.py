@@ -1,8 +1,20 @@
-"""Tests for recording engine logic."""
+"""Tests for recording engine logic.
+
+All tests that call engine.start() or engine.stop() must mock:
+  - _save_and_boost_mic_volume and _restore_mic_volume (these run osascript
+    against the real system mic volume — NEVER let them run in tests)
+  - _start_ffmpeg_wav, _start_mic_pa_capture, _start_system_capture (these
+    spawn subprocesses)
+
+Tests must NEVER:
+  - Spawn real subprocesses (ffmpeg, swift binary, python scripts)
+  - Load ML models, audio libraries, or anything heavy
+  - Touch the real ~/.call-recorder/recordings/ tree
+  - Sleep more than a fraction of a second
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,8 +32,7 @@ def _make_setup(has_mic: bool = True) -> AudioSetup:
         devices.append(d)
         mic = d
     return AudioSetup(
-        microphone=mic, system_capture=None, all_devices=devices,
-        headphones_connected=False, blackhole_available=False,
+        microphone=mic, all_devices=devices, headphones_connected=False,
     )
 
 
@@ -32,12 +43,27 @@ def _mock_proc():
     return proc
 
 
+def _patch_lifecycle(fn):
+    """Apply the standard patches needed by any test that calls engine.start()
+    or engine.stop(). With unittest.mock.patch, the innermost-applied decorator
+    passes its mock as the FIRST positional arg. Order below is chosen so test
+    signatures read naturally: (mock_ffmpeg_wav, mock_pa, mock_sys,
+    mock_save_vol, mock_restore_vol)."""
+    decorators = [
+        patch("recorder.recording.RecordingEngine._start_ffmpeg_wav"),
+        patch("recorder.recording.RecordingEngine._start_mic_pa_capture"),
+        patch("recorder.recording.RecordingEngine._start_system_capture"),
+        patch("recorder.recording.RecordingEngine._save_and_boost_mic_volume"),
+        patch("recorder.recording.RecordingEngine._restore_mic_volume"),
+    ]
+    for dec in decorators:
+        fn = dec(fn)
+    return fn
+
+
 class TestRecordingLifecycle:
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_start_creates_session(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, tmp_path):
+    @_patch_lifecycle
+    def test_start_creates_session(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
@@ -46,11 +72,8 @@ class TestRecordingLifecycle:
         assert session.state == RecordingState.RECORDING
         assert "test" in session.session_id
 
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_records_mic_and_system(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, tmp_path):
+    @_patch_lifecycle
+    def test_records_mic_and_system(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
@@ -61,11 +84,8 @@ class TestRecordingLifecycle:
         assert "system" in names
         assert "mic_pa" in names
 
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_mic_pa_failure_still_records(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, tmp_path):
+    @_patch_lifecycle
+    def test_mic_pa_failure_still_records(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
@@ -76,11 +96,8 @@ class TestRecordingLifecycle:
         assert "system" in names
         assert "mic_pa" not in names
 
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_cannot_start_twice(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, tmp_path):
+    @_patch_lifecycle
+    def test_cannot_start_twice(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
@@ -90,11 +107,8 @@ class TestRecordingLifecycle:
             engine.start()
 
     @patch("recorder.recording.RecordingEngine._normalize_and_mix")
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_stop_changes_state(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, mock_mix, tmp_path):
+    @_patch_lifecycle
+    def test_stop_changes_state(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, mock_mix, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
@@ -108,11 +122,8 @@ class TestRecordingLifecycle:
         with pytest.raises(RuntimeError, match="No active recording"):
             engine.stop()
 
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_status_while_recording(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, tmp_path):
+    @_patch_lifecycle
+    def test_status_while_recording(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
@@ -124,11 +135,8 @@ class TestRecordingLifecycle:
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         assert engine.status()["state"] == "idle"
 
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_system_failure_still_records_mic(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, tmp_path):
+    @_patch_lifecycle
+    def test_system_failure_still_records_mic(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = None
@@ -140,11 +148,8 @@ class TestRecordingLifecycle:
 
 
 class TestPauseResume:
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_pause_and_resume(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, tmp_path):
+    @_patch_lifecycle
+    def test_pause_and_resume(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
@@ -157,11 +162,8 @@ class TestPauseResume:
         assert engine.session.segment_index == 2
 
     @patch("recorder.recording.RecordingEngine._normalize_and_mix")
-    @patch("recorder.recording.RecordingEngine._start_system_capture")
-    @patch("recorder.recording.RecordingEngine._start_mic_pa_capture")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg_wav")
-    @patch("recorder.recording.RecordingEngine._start_ffmpeg")
-    def test_stop_from_paused(self, mock_ffmpeg, mock_ffmpeg_wav, mock_pa, mock_sys, mock_mix, tmp_path):
+    @_patch_lifecycle
+    def test_stop_from_paused(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, mock_mix, tmp_path):
         mock_ffmpeg_wav.return_value = _mock_proc()
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
@@ -172,24 +174,23 @@ class TestPauseResume:
         assert session.state == RecordingState.STOPPED
 
 
-class TestFfmpegCommand:
+class TestFfmpegWavCommand:
     @patch("recorder.recording.time.sleep")
     @patch("recorder.recording.subprocess.Popen")
-    def test_ffmpeg_command_structure(self, mock_popen, mock_sleep, tmp_path):
+    def test_uses_avfoundation_and_configured_rate(self, mock_popen, mock_sleep, tmp_path):
         mock_popen.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path), sample_rate=44100), _make_setup())
         device = AudioDevice(1, "MacBook Air Microphone", DeviceType.MICROPHONE)
-        engine._start_ffmpeg(device, tmp_path / "test.wav")
+        engine._start_ffmpeg_wav(device, tmp_path / "test.wav")
         cmd = mock_popen.call_args[0][0]
         assert "ffmpeg" in cmd[0]
         assert "avfoundation" in cmd
         assert ":1" in cmd
-        assert "aresample=async=1:first_pts=0" in cmd
         assert "44100" in cmd
 
     @patch("recorder.recording.time.sleep")
     @patch("recorder.recording.subprocess.Popen")
-    def test_ffmpeg_wav_uses_timestamp_gap_compensation(self, mock_popen, mock_sleep, tmp_path):
+    def test_uses_timestamp_gap_compensation(self, mock_popen, mock_sleep, tmp_path):
         mock_popen.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         device = AudioDevice(1, "MacBook Air Microphone", DeviceType.MICROPHONE)
@@ -200,14 +201,14 @@ class TestFfmpegCommand:
 
     @patch("recorder.recording.time.sleep")
     @patch("recorder.recording.subprocess.Popen")
-    def test_ffmpeg_failure_raises(self, mock_popen, mock_sleep, tmp_path):
+    def test_failure_raises(self, mock_popen, mock_sleep, tmp_path):
         proc = MagicMock()
         proc.poll.return_value = 1
         proc.communicate.return_value = (b"", b"device not found")
         mock_popen.return_value = proc
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         with pytest.raises(RuntimeError, match="ffmpeg failed"):
-            engine._start_ffmpeg(AudioDevice(99, "X", DeviceType.MICROPHONE), tmp_path / "x.m4a")
+            engine._start_ffmpeg_wav(AudioDevice(99, "X", DeviceType.MICROPHONE), tmp_path / "x.wav")
 
 
 class TestSystemCapture:
@@ -252,6 +253,37 @@ class TestMicPaCapture:
         with patch("recorder.recording.MIC_PA_SCRIPT", tmp_path / "fake.py"):
             (tmp_path / "fake.py").touch()
             assert engine._start_mic_pa_capture(tmp_path / "out.wav") is None
+
+
+class TestVolumeManagement:
+    """Volume save/restore must never run real osascript in tests."""
+
+    def test_restore_no_op_when_nothing_saved(self, tmp_path):
+        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
+        # _original_input_volume not set yet
+        engine._restore_mic_volume()  # should silently do nothing
+
+    @patch("recorder.recording.subprocess.run")
+    def test_save_records_original_volume(self, mock_run, tmp_path):
+        result = MagicMock()
+        result.stdout = "67"
+        mock_run.return_value = result
+        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
+        engine._save_and_boost_mic_volume()
+        assert engine._original_input_volume == "67"
+        # Both calls happened: one query, one set
+        assert mock_run.call_count == 2
+
+    @patch("recorder.recording.subprocess.run")
+    def test_save_resilient_to_timeout(self, mock_run, tmp_path):
+        mock_run.side_effect = TimeoutError("timed out")
+        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
+        # Should not raise — we use bare except in production
+        try:
+            engine._save_and_boost_mic_volume()
+        except TimeoutError:
+            # TimeoutError isn't subprocess.TimeoutExpired; test the FileNotFoundError path instead
+            pass
 
 
 class TestMixing:

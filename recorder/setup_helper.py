@@ -1,74 +1,23 @@
-"""Helpers for setting up macOS audio routing (Multi-Output Device via coreaudio)."""
+"""Helpers for checking that the macOS environment is ready to record.
+
+The recorder needs:
+  - ffmpeg (for the avfoundation mic track)
+  - Screen Recording permission for the terminal/IDE that launches the recorder
+    (ScreenCaptureKit refuses to start otherwise)
+  - Microphone permission for the same binary, plus for the Python interpreter
+    that runs the PortAudio mic track
+
+These checks are observational only — they print guidance and never modify
+system state.
+"""
 
 from __future__ import annotations
 
 import subprocess
 
 
-def check_multi_output_device() -> bool:
-    """Check if a Multi-Output Device exists that includes BlackHole."""
-    try:
-        result = subprocess.run(
-            ["system_profiler", "SPAudioDataType"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return "multi-output" in result.stdout.lower()
-    except Exception:
-        return False
-
-
-def print_setup_instructions(headphones: bool) -> None:
-    """Print instructions for setting up audio routing."""
-    output_device = "your headphones" if headphones else "MacBook Air Speakers"
-
-    print("""
-=== Audio Setup Instructions ===
-
-To record the other person's audio during a call, you need a
-Multi-Output Device that sends sound to both {output} AND BlackHole 2ch.
-
-Steps:
-1. Open "Audio MIDI Setup" (Spotlight → "Audio MIDI Setup")
-2. Click "+" at the bottom-left → "Create Multi-Output Device"
-3. Check the boxes for:
-   - {output}
-   - BlackHole 2ch
-4. Make sure "Drift Correction" is checked for BlackHole 2ch
-5. Right-click the Multi-Output Device → "Use This Device For Sound Output"
-
-When done, your call app will send audio through both {output} (so you hear it)
-and BlackHole (so the recorder captures it).
-
-Your microphone stays as "MacBook Air Microphone" — no changes needed there.
-
-TIP: You can rename the Multi-Output Device by double-clicking its name.
-     Call it something like "Record + {short_output}".
-
-=== End Setup ===
-""".format(
-        output=output_device,
-        short_output="Headphones" if headphones else "Speakers",
-    ))
-
-
-def check_blackhole_loaded() -> bool:
-    """Check if BlackHole appears as a usable audio device."""
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return "blackhole" in result.stderr.lower()
-    except Exception:
-        return False
-
-
 def check_ffmpeg_installed() -> bool:
-    """Check if ffmpeg is available."""
+    """Check if ffmpeg is available on PATH."""
     try:
         subprocess.run(
             ["ffmpeg", "-version"],
@@ -78,3 +27,29 @@ def check_ffmpeg_installed() -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+def print_setup_instructions(headphones: bool) -> None:
+    """Print a short setup checklist for a fresh machine."""
+    output_desc = "your headphones" if headphones else "MacBook speakers"
+    print(f"""
+=== Recording setup ===
+
+System audio (the other person's voice) is captured via ScreenCaptureKit.
+No virtual audio device (BlackHole) or Multi-Output Device is needed.
+
+Checklist:
+  1. ffmpeg installed: brew install ffmpeg
+  2. Screen Recording permission granted to your terminal:
+     System Settings → Privacy & Security → Screen Recording → enable Terminal
+  3. Microphone permission granted to your terminal and to Python (for the
+     PortAudio A/B mic track):
+     System Settings → Privacy & Security → Microphone
+  4. Headphones recommended ({output_desc} currently detected as default).
+     Without headphones the mic picks up bleed from the speakers, so the two
+     tracks are no longer cleanly separated.
+
+To record:
+  python3 -m recorder start -l "label"
+=== End setup ===
+""")

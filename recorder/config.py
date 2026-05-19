@@ -12,11 +12,15 @@ DEFAULT_RECORDINGS_DIR = Path.home() / ".call-recorder" / "recordings"
 
 @dataclass
 class AudioProfile:
-    """A named audio configuration for a specific setup."""
+    """A named audio configuration for a specific setup.
+
+    `preferred_mic` is a substring matched against device names returned by
+    `detect_ffmpeg_devices`. Empty string means "auto: pick first non-builtin
+    mic, fall back to builtin".
+    """
     name: str
     description: str
-    preferred_mic: str  # Substring match against device name
-    preferred_system_capture: str = "BlackHole"
+    preferred_mic: str
 
     @staticmethod
     def defaults() -> dict[str, AudioProfile]:
@@ -29,7 +33,7 @@ class AudioProfile:
             "headphones": AudioProfile(
                 name="headphones",
                 description="Headphones with working mic — use headphone mic",
-                preferred_mic="",  # Will be resolved to headphone mic at runtime
+                preferred_mic="",
             ),
             "speaker": AudioProfile(
                 name="speaker",
@@ -41,37 +45,26 @@ class AudioProfile:
 
 @dataclass
 class RecordingConfig:
-    # Audio format
+    # Audio format for the mixed recording.m4a output. Source tracks (_mic.wav,
+    # _system.wav, _mic_pa.wav) are always raw PCM regardless of these values.
     sample_rate: int = 48000
     channels: int = 1
     codec: str = "aac"
     format: str = "m4a"
     bitrate: str = "128k"
 
-    # Active profile name
     active_profile: str = "headphones-broken-mic"
-
-    # Custom profiles (serialized as dicts)
     profiles: dict[str, dict] = field(default_factory=dict)
-
-    # Recording behavior
-    separate_tracks: bool = True  # Record mic and system as separate files
-    mix_tracks: bool = True       # Also produce a mixed file
     recordings_dir: str = str(DEFAULT_RECORDINGS_DIR)
-
-    # Post-recording hooks (commands to run after recording finishes)
-    post_hooks: list[str] = field(default_factory=list)
 
     def get_profile(self, name: str | None = None) -> AudioProfile:
         name = name or self.active_profile
         defaults = AudioProfile.defaults()
 
-        # Check custom profiles first
         if name in self.profiles:
             d = self.profiles[name]
             return AudioProfile(**d)
 
-        # Then defaults
         if name in defaults:
             return defaults[name]
 
@@ -82,9 +75,7 @@ class RecordingConfig:
 
     def list_profiles(self) -> list[AudioProfile]:
         defaults = AudioProfile.defaults()
-        all_profiles = []
-        for p in defaults.values():
-            all_profiles.append(p)
+        all_profiles = list(defaults.values())
         for name, d in self.profiles.items():
             if name not in defaults:
                 all_profiles.append(AudioProfile(**d))

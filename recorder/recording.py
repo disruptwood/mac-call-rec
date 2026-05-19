@@ -87,11 +87,11 @@ class RecordingEngine:
             output_dir=output_dir,
         )
 
-        # Boost mic input for recording (macOS default may be 50%)
-        # Save current level to restore after
-        r = subprocess.run(["osascript", "-e", "input volume of (get volume settings)"], capture_output=True, text=True)
-        self._original_input_volume = r.stdout.strip()
-        subprocess.run(["osascript", "-e", "set volume input volume 85"], capture_output=True)
+        if not self.audio.headphones_connected:
+            print("WARN: no headphones detected — mic will pick up bleed from speakers. "
+                  "For clean speaker separation, plug in headphones.")
+
+        self._save_and_boost_mic_volume()
 
         self._start_segment()
 
@@ -130,9 +130,7 @@ class RecordingEngine:
 
         self.session.state = RecordingState.STOPPED
 
-        # Restore original mic input volume
-        if hasattr(self, '_original_input_volume') and self._original_input_volume:
-            subprocess.run(["osascript", "-e", f"set volume input volume {self._original_input_volume}"], capture_output=True)
+        self._restore_mic_volume()
 
         self._concat_segments()
         self._normalize_and_mix()
@@ -206,23 +204,38 @@ class RecordingEngine:
         self.session.segment_index += 1
 
     def _stop_processes(self) -> None:
+        """Stop every active capture process. Must NOT raise — a failure on one
+        track (e.g. mic ffmpeg died and its stdin is closed) cannot prevent
+        the others (mic_pa, system) from being terminated cleanly."""
         for track in self.session.tracks:
-            if track.process and track.process.poll() is None:
+            if not track.process or track.process.poll() is not None:
+                continue
+            try:
                 if track.name == "mic":
                     try:
                         track.process.communicate(input=b"q", timeout=5)
-                    except subprocess.TimeoutExpired:
-                        track.process.send_signal(signal.SIGINT)
+                    except (subprocess.TimeoutExpired, BrokenPipeError, OSError):
                         try:
+                            track.process.send_signal(signal.SIGINT)
                             track.process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            track.process.kill()
+                        except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+                            try:
+                                track.process.kill()
+                            except (ProcessLookupError, OSError):
+                                pass
                 else:
-                    track.process.send_signal(signal.SIGTERM)
                     try:
+                        track.process.send_signal(signal.SIGTERM)
                         track.process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
-                        track.process.kill()
+                        try:
+                            track.process.kill()
+                        except (ProcessLookupError, OSError):
+                            pass
+                    except (ProcessLookupError, OSError):
+                        pass
+            except Exception as e:
+                print(f"Warning: error stopping track {track.name}: {e}")
 
     def _concat_segments(self) -> None:
         """Concatenate pause/resume segments into single track files."""
@@ -260,50 +273,67 @@ class RecordingEngine:
                     t.output_path = final_path
 
     def _normalize_and_mix(self) -> None:
-        """Normalize mic volume + mix with system → recording.m4a. Keep source tracks."""
-        output_dir = self.session.output_dir
-        mic_track = next((t for t in self.session.tracks if t.name == "mic"), None)
-        sys_track = next((t for t in self.session.tracks if t.name == "system"), None)
+        """Produce recording.m4a from available source tracks.
 
-        recording_path = output_dir / f"recording.{self.config.format}"
+        Cases:
+          - mic + system → loudnorm mic, then amix with system
+          - system only → transcode to m4a (no mix needed)
+          - mic only → rename WAV directly to recording.m4a (cheapest path)
 
-        if mic_track and sys_track and mic_track.output_path.exists() and sys_track.output_path.exists():
-            cmd = [
+        The PortAudio mic_pa track (if recorded) is NOT mixed here — it sits
+        next to recording.m4a as _mic_pa.wav for A/B diagnostic. After the
+        PortAudio path is verified, swap it in here.
+        """
+        recording_path = self.session.output_dir / f"recording.{self.config.format}"
+        mic = next((t for t in self.session.tracks
+                    if t.name == "mic" and t.output_path.exists()), None)
+        sys_t = next((t for t in self.session.tracks
+                      if t.name == "system" and t.output_path.exists()), None)
+
+        cmd = self._build_normalize_mix_cmd(mic, sys_t, recording_path)
+        if cmd is None:
+            if mic:
+                mic.output_path.rename(recording_path)
+                self.session.recording_path = recording_path
+            return
+
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=300, check=True)
+            self.session.recording_path = recording_path
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            print(f"Warning: normalize+mix failed: {e}")
+
+    def _build_normalize_mix_cmd(
+        self, mic: Track | None, sys_t: Track | None, output_path: Path,
+    ) -> list[str] | None:
+        """Build ffmpeg command for mic+system mix or system-only transcode.
+
+        Returns None when there is no ffmpeg work to do (mic-only is handled by
+        the caller via rename, no transcode needed)."""
+        if mic and sys_t:
+            return [
                 "ffmpeg",
-                "-i", str(mic_track.output_path),
-                "-i", str(sys_track.output_path),
+                "-i", str(mic.output_path),
+                "-i", str(sys_t.output_path),
                 "-filter_complex",
-                "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[mic];"
-                "[mic][1:a]amix=inputs=2:duration=longest[out]",
+                "[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[m];"
+                "[m][1:a]amix=inputs=2:duration=longest[out]",
                 "-map", "[out]",
                 "-ar", str(self.config.sample_rate),
                 "-ac", str(self.config.channels),
                 "-c:a", self.config.codec, "-b:a", self.config.bitrate,
-                "-y", str(recording_path),
+                "-y", str(output_path),
             ]
-            try:
-                subprocess.run(cmd, capture_output=True, timeout=300, check=True)
-                self.session.recording_path = recording_path
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                print(f"Warning: normalize+mix failed: {e}")
-
-        elif sys_track and sys_track.output_path.exists():
-            cmd = [
-                "ffmpeg", "-i", str(sys_track.output_path),
+        if sys_t:
+            return [
+                "ffmpeg",
+                "-i", str(sys_t.output_path),
                 "-ar", str(self.config.sample_rate),
                 "-ac", str(self.config.channels),
                 "-c:a", self.config.codec, "-b:a", self.config.bitrate,
-                "-y", str(recording_path),
+                "-y", str(output_path),
             ]
-            try:
-                subprocess.run(cmd, capture_output=True, timeout=300, check=True)
-                self.session.recording_path = recording_path
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                pass
-
-        elif mic_track and mic_track.output_path.exists():
-            mic_track.output_path.rename(recording_path)
-            self.session.recording_path = recording_path
+        return None
 
     def _write_manifest(self) -> None:
         if not self.session:
@@ -356,27 +386,38 @@ class RecordingEngine:
             raise RuntimeError(f"ffmpeg failed: {tail.decode(errors='replace')}")
         return proc
 
-    def _start_ffmpeg(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
-        cmd = [
-            "ffmpeg",
-            "-f", "avfoundation",
-            "-i", f":{device.index}",
-            "-af", "aresample=async=1:first_pts=0",
-            "-ar", str(self.config.sample_rate),
-            "-ac", str(self.config.channels),
-            "-c:a", self.config.codec,
-            "-b:a", self.config.bitrate,
-            "-y", str(output_path),
-        ]
-        log_path = output_path.with_suffix(output_path.suffix + ".ffmpeg.log")
-        log_file = open(log_path, "wb")
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=log_file, stderr=log_file)
-        time.sleep(0.3)
-        if proc.poll() is not None:
-            log_file.close()
-            tail = log_path.read_bytes()[-500:] if log_path.exists() else b""
-            raise RuntimeError(f"ffmpeg failed: {tail.decode(errors='replace')}")
-        return proc
+    def _save_and_boost_mic_volume(self) -> None:
+        """Save current mic input volume and boost to 85% for recording.
+
+        macOS default mic input is often ~50% which records -42 dB. We boost
+        to 85% on start and restore on stop (see _restore_mic_volume).
+        Mocked in tests to avoid changing real system volume.
+        """
+        try:
+            r = subprocess.run(
+                ["osascript", "-e", "input volume of (get volume settings)"],
+                capture_output=True, text=True, timeout=5,
+            )
+            self._original_input_volume = r.stdout.strip()
+            subprocess.run(
+                ["osascript", "-e", "set volume input volume 85"],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            self._original_input_volume = ""
+
+    def _restore_mic_volume(self) -> None:
+        """Restore mic input volume to the pre-recording level."""
+        original = getattr(self, "_original_input_volume", "")
+        if not original:
+            return
+        try:
+            subprocess.run(
+                ["osascript", "-e", f"set volume input volume {original}"],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     def _start_system_capture(self, output_path: Path) -> subprocess.Popen | None:
         """Start ScreenCaptureKit system audio capture, log stderr to file."""
@@ -419,7 +460,10 @@ class RecordingEngine:
         log_path = output_path.with_suffix(output_path.suffix + ".pa.log")
         log_file = open(log_path, "wb")
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=log_file, stderr=log_file)
-        time.sleep(0.5)
+        # PortAudio's first stream open on macOS can take up to ~1.5s when the
+        # TCC mic-permission dialog appears or when waking a Bluetooth device.
+        # Sleep long enough that poll() reliably catches early-death failures.
+        time.sleep(2.0)
         if proc.poll() is not None:
             log_file.close()
             tail = log_path.read_bytes()[-500:] if log_path.exists() else b""

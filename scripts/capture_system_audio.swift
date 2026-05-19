@@ -1,7 +1,30 @@
 #!/usr/bin/env swift
-// Captures system audio using ScreenCaptureKit (macOS 13+).
-// No BlackHole or Multi-Output Device needed.
-// Usage: swift capture_system_audio.swift <output.wav> [duration_seconds]
+// Captures macOS system audio (everything playing through the default output
+// device) via ScreenCaptureKit and writes it to a WAV file.
+//
+// Usage: capture_system_audio <output.wav>
+//   Records until SIGTERM or SIGINT.
+//
+// Build:
+//   xcrun -sdk macosx swiftc capture_system_audio.swift -o capture_system_audio
+//
+// Run as subprocess from recorder/recording.py. The parent sends SIGTERM
+// to stop. WAV is finalized in stop() via AVAssetWriter.finishWriting; if
+// the parent SIGKILLs us, the file's RIFF header will be left with
+// placeholder sizes and won't be readable by ffmpeg — the parent's wait
+// timeout is set generously to avoid that.
+//
+// Reliability fixes layered over the baseline ScreenCaptureKit demo:
+//   - audioQueue.sync barrier in stop() so a callback can't append to a
+//     just-finished writer.
+//   - Periodically checks fileWriter.status; on .failed we log and exit
+//     instead of silently no-op'ing every append for the rest of the
+//     session.
+//   - SCStreamDelegate.stream(_:didStopWithError:) wired up so a mid-session
+//     halt (display reconfigure, permission revoked, system pressure)
+//     surfaces as a non-zero exit + log line instead of a silent zero-byte
+//     gap.
+//   - startWriting() return value checked.
 
 import AVFoundation
 import Foundation
@@ -12,32 +35,34 @@ func log(_ msg: String) {
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    log("Usage: capture_system_audio <output.wav> [duration_seconds]")
-    log("  If duration is omitted, records until killed (Ctrl+C or SIGTERM)")
+    log("Usage: capture_system_audio <output.wav>")
+    log("  Records until killed (SIGTERM/SIGINT).")
     exit(1)
 }
 
 let outputPath = CommandLine.arguments[1]
-let duration: Double? = CommandLine.arguments.count >= 3 ? Double(CommandLine.arguments[2]) : nil
 
-class AudioRecorder: NSObject, SCStreamOutput {
+final class AudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     var fileWriter: AVAssetWriter?
     var audioInput: AVAssetWriterInput?
     var stream: SCStream?
     var isRecording = false
     var sessionStarted = false
     var sampleCount = 0
+    var loggedWriterFailure = false
     let outputURL: URL
-    let pipePCM: Bool  // Write raw PCM (int16 mono 16kHz) to stdout
+    let audioQueue = DispatchQueue(label: "com.callrecorder.audio")
+    var streamHaltedWithError: Error?
 
-    init(outputURL: URL, pipePCM: Bool = false) {
+    init(outputURL: URL) {
         self.outputURL = outputURL
-        self.pipePCM = pipePCM
         super.init()
     }
 
     func start() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false
+        )
         guard let display = content.displays.first else {
             log("ERROR: No display found")
             exit(1)
@@ -49,13 +74,12 @@ class AudioRecorder: NSObject, SCStreamOutput {
         config.excludesCurrentProcessAudio = false
         config.sampleRate = 48000
         config.channelCount = 2
-
-        // We only want audio, minimize video overhead
+        // Video pipeline is unused but ScreenCaptureKit requires *some* video
+        // configuration; pick the smallest legal frame size and slowest tick.
         config.width = 2
         config.height = 2
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1 fps min
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
-        // Set up file writer
         try? FileManager.default.removeItem(at: outputURL)
         fileWriter = try AVAssetWriter(outputURL: outputURL, fileType: .wav)
 
@@ -71,11 +95,15 @@ class AudioRecorder: NSObject, SCStreamOutput {
         audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
         audioInput!.expectsMediaDataInRealTime = true
         fileWriter!.add(audioInput!)
-        fileWriter!.startWriting()
-        // Session will start at first sample's timestamp
 
-        let audioQueue = DispatchQueue(label: "com.callrecorder.audio")
-        stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        guard fileWriter!.startWriting() else {
+            let err = fileWriter!.error?.localizedDescription ?? "unknown"
+            log("ERROR: AVAssetWriter.startWriting failed: \(err)")
+            exit(1)
+        }
+        // Session will start at the first sample's timestamp (see callback).
+
+        stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream!.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         try await stream!.startCapture()
         isRecording = true
@@ -83,19 +111,58 @@ class AudioRecorder: NSObject, SCStreamOutput {
     }
 
     func stop() async {
-        guard isRecording else { return }
-        isRecording = false
-        try? await stream?.stopCapture()
-        audioInput?.markAsFinished()
+        // Barrier on audioQueue ensures no callback can be in-flight (or
+        // start) while we mark the writer as finished. Without this, a
+        // sample buffer can race past the isRecording check and try to
+        // append to a writer that's already finalized.
+        audioQueue.sync {
+            guard isRecording else { return }
+            isRecording = false
+            audioInput?.markAsFinished()
+        }
+
+        do {
+            try await stream?.stopCapture()
+        } catch {
+            log("Warning: stream.stopCapture threw: \(error)")
+        }
+
         await fileWriter?.finishWriting()
+
+        let finalStatus = fileWriter?.status
+        if finalStatus == .failed {
+            let err = fileWriter?.error?.localizedDescription ?? "unknown"
+            log("ERROR: AVAssetWriter final status .failed: \(err)")
+        }
+
         log("Total audio samples: \(sampleCount)")
         log("Saved: \(outputURL.path)")
         let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int) ?? 0
         log("Size: \(size / 1024) KB")
+        if let e = streamHaltedWithError {
+            log("ScreenCaptureKit stream had halted with: \(e)")
+        }
     }
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+    // MARK: - SCStreamOutput
+
+    func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of type: SCStreamOutputType
+    ) {
         guard type == .audio, isRecording else { return }
+
+        if let status = fileWriter?.status, status == .failed {
+            if !loggedWriterFailure {
+                loggedWriterFailure = true
+                let err = fileWriter?.error?.localizedDescription ?? "unknown"
+                log("ERROR: AVAssetWriter entered .failed mid-session: \(err)")
+            }
+            isRecording = false
+            return
+        }
+
         guard let audioInput = audioInput, audioInput.isReadyForMoreMediaData else { return }
 
         if !sessionStarted {
@@ -107,46 +174,38 @@ class AudioRecorder: NSObject, SCStreamOutput {
 
         sampleCount += 1
         audioInput.append(sampleBuffer)
+    }
 
-        // Write raw PCM to stdout for streaming transcription
-        if pipePCM {
-            if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
-                let length = CMBlockBufferGetDataLength(blockBuffer)
-                var data = Data(count: length)
-                data.withUnsafeMutableBytes { ptr in
-                    CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: ptr.baseAddress!)
-                }
-                FileHandle.standardOutput.write(data)
-            }
-        }
+    // MARK: - SCStreamDelegate
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        log("ERROR: ScreenCaptureKit stream halted mid-session: \(error)")
+        streamHaltedWithError = error
+        // Signal main loop to exit (next 100ms tick).
+        shouldStopGlobal = true
     }
 }
 
-let pipePCM = CommandLine.arguments.contains("--pipe")
-let recorder = AudioRecorder(outputURL: URL(fileURLWithPath: outputPath), pipePCM: pipePCM)
+// File-scope flag readable by main loop and writable by signal handlers and
+// the SCStreamDelegate. Swift's Bool isn't formally atomic, but on the
+// architectures we ship to a one-word store is effectively atomic; the
+// worst case is a one-tick read delay before we notice.
+var shouldStopGlobal = false
+
+signal(SIGINT) { _ in shouldStopGlobal = true }
+signal(SIGTERM) { _ in shouldStopGlobal = true }
+
+let recorder = AudioRecorder(outputURL: URL(fileURLWithPath: outputPath))
 let semaphore = DispatchSemaphore(value: 0)
-
-// Handle SIGINT/SIGTERM for graceful stop
-var shouldStop = false
-
-signal(SIGINT) { _ in shouldStop = true }
-signal(SIGTERM) { _ in shouldStop = true }
 
 Task {
     do {
         try await recorder.start()
-
-        if let dur = duration {
-            log("Recording for \(Int(dur)) seconds...")
-            try await Task.sleep(nanoseconds: UInt64(dur * 1_000_000_000))
-        } else {
-            log("Recording until interrupted (Ctrl+C)...")
-            while !shouldStop {
-                try await Task.sleep(nanoseconds: 100_000_000) // 100ms
-            }
+        log("Recording until interrupted (SIGTERM/SIGINT)...")
+        while !shouldStopGlobal {
+            try await Task.sleep(nanoseconds: 100_000_000)  // 100 ms
         }
-
-        log("\nStopping...")
+        log("Stopping...")
         await recorder.stop()
     } catch {
         log("Error: \(error)")
