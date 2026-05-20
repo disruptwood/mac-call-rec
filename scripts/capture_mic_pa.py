@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Record default mic to WAV using sounddevice (PortAudio → CoreAudio HAL).
 
-Bypasses AVFoundation/VPIO. Used in parallel with ffmpeg avfoundation as A/B
-test against the WebRTC drift bug. PortAudio on macOS talks directly to the
-CoreAudio HAL layer (AudioDeviceCreateIOProcID) — the same path used by
-Audacity, REAPER, sox. VPIO mode-switch from active WebRTC mic capture in a
-browser does not affect this path.
+Primary mic-capture path for the recorder since 2026-05-20 — replaced
+the previous ffmpeg avfoundation path which suffered up to 40% drift
+under VPIO on long WebRTC sessions.
+
+PortAudio on macOS talks directly to the CoreAudio HAL layer
+(AudioDeviceCreateIOProcID) — the same path used by Audacity, REAPER,
+sox. VPIO mode-switch from active WebRTC mic capture in a browser does
+not affect this path.
 
 Usage:
     python3 capture_mic_pa.py <output.wav> [duration_seconds]

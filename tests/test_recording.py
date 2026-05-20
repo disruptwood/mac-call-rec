@@ -3,8 +3,7 @@
 All tests that call engine.start() or engine.stop() must mock:
   - _save_and_boost_mic_volume and _restore_mic_volume (these run osascript
     against the real system mic volume — NEVER let them run in tests)
-  - _start_ffmpeg_wav, _start_mic_pa_capture, _start_system_capture (these
-    spawn subprocesses)
+  - _start_mic_pa_capture, _start_system_capture (these spawn subprocesses)
 
 Tests must NEVER:
   - Spawn real subprocesses (ffmpeg, swift binary, python scripts)
@@ -47,10 +46,9 @@ def _patch_lifecycle(fn):
     """Apply the standard patches needed by any test that calls engine.start()
     or engine.stop(). With unittest.mock.patch, the innermost-applied decorator
     passes its mock as the FIRST positional arg. Order below is chosen so test
-    signatures read naturally: (mock_ffmpeg_wav, mock_pa, mock_sys,
-    mock_save_vol, mock_restore_vol)."""
+    signatures read naturally: (mock_pa, mock_sys, mock_save_vol,
+    mock_restore_vol)."""
     decorators = [
-        patch("recorder.recording.RecordingEngine._start_ffmpeg_wav"),
         patch("recorder.recording.RecordingEngine._start_mic_pa_capture"),
         patch("recorder.recording.RecordingEngine._start_system_capture"),
         patch("recorder.recording.RecordingEngine._save_and_boost_mic_volume"),
@@ -63,9 +61,8 @@ def _patch_lifecycle(fn):
 
 class TestRecordingLifecycle:
     @_patch_lifecycle
-    def test_start_creates_session(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
-        mock_pa.return_value = None
+    def test_start_creates_session(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
+        mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         session = engine.start(label="test")
@@ -73,33 +70,31 @@ class TestRecordingLifecycle:
         assert "test" in session.session_id
 
     @_patch_lifecycle
-    def test_records_mic_and_system(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
+    def test_records_mic_and_system(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
         mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         session = engine.start()
         names = [t.name for t in session.tracks]
-        assert "mic" in names
-        assert "system" in names
         assert "mic_pa" in names
+        assert "system" in names
 
     @_patch_lifecycle
-    def test_mic_pa_failure_still_records(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
+    def test_mic_pa_failure_records_system_only(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
+        """If PortAudio cannot start (missing dep, permission, busy device)
+        the session still proceeds with system-only audio. There is no
+        ffmpeg fallback anymore — PortAudio is the only mic path."""
         mock_pa.return_value = None
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         session = engine.start()
         names = [t.name for t in session.tracks]
-        assert "mic" in names
-        assert "system" in names
         assert "mic_pa" not in names
+        assert "system" in names
 
     @_patch_lifecycle
-    def test_cannot_start_twice(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
-        mock_pa.return_value = None
+    def test_cannot_start_twice(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
+        mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -108,9 +103,8 @@ class TestRecordingLifecycle:
 
     @patch("recorder.recording.RecordingEngine._normalize_and_mix")
     @_patch_lifecycle
-    def test_stop_changes_state(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, mock_mix, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
-        mock_pa.return_value = None
+    def test_stop_changes_state(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, mock_mix, tmp_path):
+        mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -123,9 +117,8 @@ class TestRecordingLifecycle:
             engine.stop()
 
     @_patch_lifecycle
-    def test_status_while_recording(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
-        mock_pa.return_value = None
+    def test_status_while_recording(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
+        mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -136,22 +129,20 @@ class TestRecordingLifecycle:
         assert engine.status()["state"] == "idle"
 
     @_patch_lifecycle
-    def test_system_failure_still_records_mic(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
-        mock_pa.return_value = None
+    def test_system_failure_still_records_mic(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
+        mock_pa.return_value = _mock_proc()
         mock_sys.return_value = None
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         session = engine.start()
         names = [t.name for t in session.tracks]
-        assert "mic" in names
+        assert "mic_pa" in names
         assert "system" not in names
 
 
 class TestPauseResume:
     @_patch_lifecycle
-    def test_pause_and_resume(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
-        mock_pa.return_value = None
+    def test_pause_and_resume(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, tmp_path):
+        mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
@@ -163,52 +154,14 @@ class TestPauseResume:
 
     @patch("recorder.recording.RecordingEngine._normalize_and_mix")
     @_patch_lifecycle
-    def test_stop_from_paused(self, mock_ffmpeg_wav, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, mock_mix, tmp_path):
-        mock_ffmpeg_wav.return_value = _mock_proc()
-        mock_pa.return_value = None
+    def test_stop_from_paused(self, mock_pa, mock_sys, mock_save_vol, mock_restore_vol, mock_mix, tmp_path):
+        mock_pa.return_value = _mock_proc()
         mock_sys.return_value = _mock_proc()
         engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
         engine.start()
         engine.pause()
         session = engine.stop()
         assert session.state == RecordingState.STOPPED
-
-
-class TestFfmpegWavCommand:
-    @patch("recorder.recording.time.sleep")
-    @patch("recorder.recording.subprocess.Popen")
-    def test_uses_avfoundation_and_configured_rate(self, mock_popen, mock_sleep, tmp_path):
-        mock_popen.return_value = _mock_proc()
-        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path), sample_rate=44100), _make_setup())
-        device = AudioDevice(1, "MacBook Air Microphone", DeviceType.MICROPHONE)
-        engine._start_ffmpeg_wav(device, tmp_path / "test.wav")
-        cmd = mock_popen.call_args[0][0]
-        assert "ffmpeg" in cmd[0]
-        assert "avfoundation" in cmd
-        assert ":1" in cmd
-        assert "44100" in cmd
-
-    @patch("recorder.recording.time.sleep")
-    @patch("recorder.recording.subprocess.Popen")
-    def test_uses_timestamp_gap_compensation(self, mock_popen, mock_sleep, tmp_path):
-        mock_popen.return_value = _mock_proc()
-        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
-        device = AudioDevice(1, "MacBook Air Microphone", DeviceType.MICROPHONE)
-        engine._start_ffmpeg_wav(device, tmp_path / "test.wav")
-        cmd = mock_popen.call_args[0][0]
-        assert "-af" in cmd
-        assert "aresample=async=1:first_pts=0" in cmd
-
-    @patch("recorder.recording.time.sleep")
-    @patch("recorder.recording.subprocess.Popen")
-    def test_failure_raises(self, mock_popen, mock_sleep, tmp_path):
-        proc = MagicMock()
-        proc.poll.return_value = 1
-        proc.communicate.return_value = (b"", b"device not found")
-        mock_popen.return_value = proc
-        engine = RecordingEngine(RecordingConfig(recordings_dir=str(tmp_path)), _make_setup())
-        with pytest.raises(RuntimeError, match="ffmpeg failed"):
-            engine._start_ffmpeg_wav(AudioDevice(99, "X", DeviceType.MICROPHONE), tmp_path / "x.wav")
 
 
 class TestSystemCapture:
@@ -289,7 +242,7 @@ class TestVolumeManagement:
 class TestMixing:
     @patch("recorder.recording.subprocess.run")
     def test_mixed_recording_forces_configured_sample_rate_and_channels(self, mock_run, tmp_path):
-        mic = tmp_path / "_mic.wav"
+        mic = tmp_path / "_mic_pa.wav"
         sys_f = tmp_path / "_system.wav"
         mic.write_bytes(b"mic")
         sys_f.write_bytes(b"sys")
@@ -300,7 +253,7 @@ class TestMixing:
             started_at=MagicMock(),
             output_dir=tmp_path,
             tracks=[
-                Track(name="mic", output_path=mic),
+                Track(name="mic_pa", output_path=mic),
                 Track(name="system", output_path=sys_f),
             ],
         )

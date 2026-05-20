@@ -1,32 +1,21 @@
 # Roadmap
 
-## Текущий статус (v0.2)
+## Текущий статус (v0.3)
 
-- Запись 3 параллельных треков: ffmpeg mic + PortAudio mic (A/B test) + Swift system audio
-- Post-recording mix → `recording.m4a` (пока через ffmpeg mic)
+- Запись 2 параллельных треков: PortAudio mic + Swift system audio
+- Post-recording mix → `recording.m4a` (loudnorm mic + amix с system)
 - Pause/resume через space, stop через `q`
-- `diag_postmortem.py` показывает A/B drift verdict
+- `diag_postmortem.py` показывает drift mic vs system + PortAudio counters
 - Транскрипция: ручной запуск `scripts/transcribe_gemini.py` после записи
-- 63 unit-теста, все subprocess замоканы
+- 60 unit-тестов, все subprocess замоканы
 
-## Сейчас в работе — фикс drift в записи
+## Сделано — фикс drift в записи (2026-05-20)
 
-**Блокер всех остальных пунктов:** убедиться что PortAudio mic
-(`_mic_pa.wav`) чистый при активном WebRTC браузерном звонке.
+Ffmpeg avfoundation mic-путь удалён. PortAudio (sounddevice → CoreAudio HAL)
+теперь единственный mic-источник. Подтверждено на реальной 75-минутной
+сессии: чистое аудио, синхронизация со ScreenCaptureKit-system.
 
-Шаги:
-1. 60-сек smoke test: открыть Google Meet "Instant meeting" в Chrome →
-   `python3 -m recorder start -l "vpio-test"` → `q` → `diag_postmortem.py`.
-2. Реальная сессия с психологом — записать как обычно, потом
-   `diag_postmortem.py` покажет drift обоих треков.
-
-**Решение по результату:**
-- PortAudio drift < 2% → переключить `_build_normalize_mix_cmd` на
-  `_mic_pa.wav`, удалить ffmpeg-mic путь, обновить тесты
-- PortAudio drift ≥ 5% → escalate к прямому CoreAudio HAL в Swift
-  (`AudioDeviceCreateIOProcID`, ~200 строк, гарантированно мимо VPIO)
-
-## После фикса записи
+## Следующее
 
 ### Этап 1 — Интеграция Gemini в lifecycle
 

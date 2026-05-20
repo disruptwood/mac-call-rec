@@ -168,19 +168,13 @@ class RecordingEngine:
         self.session.tracks.clear()
 
         if self.audio.can_record_mic and self.audio.microphone:
-            # WAV for mic: readable while file is growing (needed for live transcription)
-            seg_path = output_dir / f"_mic_seg{seg:03d}.wav"
-            proc = self._start_ffmpeg_wav(self.audio.microphone, seg_path)
-            self.session.tracks.append(Track(
-                name="mic", output_path=seg_path, process=proc,
-                device_name=self.audio.microphone.name,
-            ))
-            self.session.segments.setdefault("mic", []).append(seg_path)
-
-            # Parallel A/B mic capture via PortAudio (CoreAudio HAL, bypasses VPIO).
-            # Written to _mic_pa.wav alongside the ffmpeg _mic.wav for drift comparison;
-            # not mixed into recording.m4a. Soft-fail: if PortAudio cannot start
-            # (missing dep, permissions, device busy), we keep the ffmpeg track.
+            # Mic via PortAudio (CoreAudio HAL, bypasses AVFoundation/VPIO).
+            # Verified 2026-05-20: PortAudio is cleaner audio and tighter sync
+            # with the system track than the previous ffmpeg avfoundation path,
+            # which suffered up to 40% drift on long sessions under VPIO.
+            # No fallback: if PortAudio can't start (missing dep, permission
+            # denied, device busy), we record without mic rather than fall back
+            # to a known-broken path.
             pa_seg_path = output_dir / f"_mic_pa_seg{seg:03d}.wav"
             pa_proc = self._start_mic_pa_capture(
                 pa_seg_path, device_name=self.audio.microphone.name,
@@ -191,6 +185,9 @@ class RecordingEngine:
                     device_name=f"PortAudio: {self.audio.microphone.name}",
                 ))
                 self.session.segments.setdefault("mic_pa", []).append(pa_seg_path)
+            else:
+                print("WARN: PortAudio mic capture failed to start — session "
+                      "will record system audio only")
 
         seg_path = output_dir / f"_system_seg{seg:03d}.wav"
         proc = self._start_system_capture(seg_path)
@@ -280,13 +277,13 @@ class RecordingEngine:
           - system only → transcode to m4a (no mix needed)
           - mic only → rename WAV directly to recording.m4a (cheapest path)
 
-        The PortAudio mic_pa track (if recorded) is NOT mixed here — it sits
-        next to recording.m4a as _mic_pa.wav for A/B diagnostic. After the
-        PortAudio path is verified, swap it in here.
+        Mic is always PortAudio (`mic_pa` track) since 2026-05-20 — the
+        ffmpeg avfoundation path was dropped because it drifted up to 40%
+        under VPIO on long sessions.
         """
         recording_path = self.session.output_dir / f"recording.{self.config.format}"
         mic = next((t for t in self.session.tracks
-                    if t.name == "mic" and t.output_path.exists()), None)
+                    if t.name == "mic_pa" and t.output_path.exists()), None)
         sys_t = next((t for t in self.session.tracks
                       if t.name == "system" and t.output_path.exists()), None)
 
@@ -357,34 +354,6 @@ class RecordingEngine:
         manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
 
     # --- Process launchers ---
-
-    def _start_ffmpeg_wav(self, device: AudioDevice, output_path: Path) -> subprocess.Popen:
-        """Record mic as WAV (PCM int16) — readable while file is growing.
-
-        ffmpeg stderr (progress + format detection) is redirected to a .ffmpeg.log
-        file. This both captures diagnostics and prevents the stderr pipe buffer
-        from filling up over long sessions (which can block ffmpeg and cause
-        sample drops).
-        """
-        cmd = [
-            "ffmpeg",
-            "-f", "avfoundation",
-            "-i", f":{device.index}",
-            "-af", "aresample=async=1:first_pts=0",
-            "-ar", str(self.config.sample_rate),
-            "-ac", str(self.config.channels),
-            "-c:a", "pcm_s16le",
-            "-y", str(output_path),
-        ]
-        log_path = output_path.with_suffix(output_path.suffix + ".ffmpeg.log")
-        log_file = open(log_path, "wb")
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=log_file, stderr=log_file)
-        time.sleep(0.3)
-        if proc.poll() is not None:
-            log_file.close()
-            tail = log_path.read_bytes()[-500:] if log_path.exists() else b""
-            raise RuntimeError(f"ffmpeg failed: {tail.decode(errors='replace')}")
-        return proc
 
     def _save_and_boost_mic_volume(self) -> None:
         """Save current mic input volume and boost to 85% for recording.

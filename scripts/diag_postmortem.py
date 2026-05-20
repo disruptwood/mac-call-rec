@@ -156,8 +156,13 @@ def main():
     results = {}
     for name, path in [("mic", mic), ("mic_pa", mic_pa), ("system", sys_f), ("recording.m4a", rec)]:
         if not path.exists():
+            if name == "mic":
+                continue  # legacy ffmpeg mic — not produced since 2026-05-20
             if name == "mic_pa":
-                continue  # mic_pa is opt-in A/B track, missing is fine
+                # PortAudio may have soft-failed (no permission, missing dep).
+                # Session can still be valid as system-only — just note it.
+                print(f"{name:16s} — MISSING (PortAudio did not start)")
+                continue
             print(f"{name:16s} — MISSING")
             continue
         data = probe(path)
@@ -202,47 +207,39 @@ def main():
             return None
         return abs(a - b) / max(a, b) * 100
 
-    if "mic" in results and "system" in results:
-        _drift_report("mic", results["mic"], results["system"])
-
     if "mic_pa" in results and "system" in results:
         _drift_report("mic_pa", results["mic_pa"], results["system"])
 
-    # Side-by-side verdict for the A/B test
-    if "mic" in results and "mic_pa" in results and "system" in results:
-        mic_drift = _safe_drift(results["mic"], results["system"])
-        pa_drift = _safe_drift(results["mic_pa"], results["system"])
-        print("\n--- A/B verdict (ffmpeg avfoundation vs PortAudio) ---")
-        if mic_drift is None or pa_drift is None:
-            print(f"  Cannot compare — durations: mic={results['mic']:.1f}s, "
-                  f"mic_pa={results['mic_pa']:.1f}s, system={results['system']:.1f}s. "
-                  f"Likely a capture crash. Check the *.log files for errors.")
-        else:
-            print(f"  ffmpeg   _mic.wav    drift: {mic_drift:.2f}%")
-            print(f"  PortAudio _mic_pa.wav drift: {pa_drift:.2f}%")
-            if pa_drift < 2 and mic_drift >= 2:
-                # PortAudio is clean and ffmpeg is at least marginally broken.
-                print("  ✓ PortAudio path is CLEAN, ffmpeg path is drifting — switch over.")
-            elif pa_drift < mic_drift - 1:
-                print(f"  PortAudio is better by {mic_drift - pa_drift:.1f}pp, but not yet clean.")
-            elif abs(pa_drift - mic_drift) < 0.5:
-                print("  Both tracks behave the same — VPIO may not be active, or bypass failed.")
-            else:
-                print("  ⚠ PortAudio is NOT better. Investigate before relying on it.")
+    # Legacy support: sessions recorded before 2026-05-20 also have a
+    # parallel _mic.wav from the now-removed ffmpeg avfoundation path.
+    # Report both so historical drift comparisons stay meaningful.
+    if "mic" in results and "system" in results:
+        _drift_report("mic (legacy ffmpeg)", results["mic"], results["system"])
+        if "mic_pa" in results:
+            mic_drift = _safe_drift(results["mic"], results["system"])
+            pa_drift = _safe_drift(results["mic_pa"], results["system"])
+            if mic_drift is not None and pa_drift is not None:
+                print("\n--- Legacy A/B (ffmpeg vs PortAudio, both present) ---")
+                print(f"  ffmpeg    _mic.wav    drift: {mic_drift:.2f}%")
+                print(f"  PortAudio _mic_pa.wav drift: {pa_drift:.2f}%")
 
-    # ffmpeg logs — check both post-concat name and segment name (logs are written
-    # with segment name before concat; concat renames the .wav but leaves the .log)
-    print("\n--- ffmpeg log (_mic.wav.ffmpeg.log) ---")
-    mic_log, mic_segment_log = first_existing_log(
-        session_dir, "_mic.wav.ffmpeg.log", "_mic_seg*.wav.ffmpeg.log",
-    )
-    if mic_segment_log:
-        print(f"  (using segment log: {mic_segment_log})")
-    info = analyze_ffmpeg_log(mic_log)
-    if not info["present"]:
+    # ffmpeg log only exists on legacy sessions (before 2026-05-20).
+    # Modern sessions are PortAudio-only — no _mic.wav, no _mic.wav.ffmpeg.log.
+    if not mic.exists():
+        mic_log = session_dir / "_mic.wav.ffmpeg.log"
+        info = {"present": False}
+    else:
+        print("\n--- ffmpeg log (_mic.wav.ffmpeg.log) — LEGACY session ---")
+        mic_log, mic_segment_log = first_existing_log(
+            session_dir, "_mic.wav.ffmpeg.log", "_mic_seg*.wav.ffmpeg.log",
+        )
+        if mic_segment_log:
+            print(f"  (using segment log: {mic_segment_log})")
+        info = analyze_ffmpeg_log(mic_log)
+    if mic.exists() and not info["present"]:
         print("  Log not present — session was recorded with OLD version of recording.py")
         print("  (Upgrade recording.py already done; next session will have the log.)")
-    else:
+    elif mic.exists() and info["present"]:
         print(f"  Log size: {info['size']} bytes")
         if "input_format" in info:
             print(f"  ffmpeg saw mic input: {info['input_format']}")
@@ -266,7 +263,7 @@ def main():
                     print(f"  ⚠ WAV sample duration differs from ffmpeg timestamps by {mismatch_pct:.1f}%")
                     print("    Mic capture needs timestamp-gap compensation (aresample=async).")
 
-    # PortAudio mic log (if A/B track was recorded)
+    # PortAudio mic log — primary mic source since 2026-05-20.
     if mic_pa.exists():
         print("\n--- capture_mic_pa log (_mic_pa.wav.pa.log) ---")
         pa_log, pa_segment_log = first_existing_log(
