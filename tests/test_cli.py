@@ -160,15 +160,15 @@ class TestMaybeRunTranscription:
             cli._maybe_run_transcription(session, backend="gemini", ask=True)
         mock_call.assert_called_once()
 
-    def test_empty_response_defaults_to_no(self, tmp_path):
+    def test_empty_response_defaults_to_yes(self, tmp_path):
         session = _fake_session(tmp_path)
         script = tmp_path / "transcribe_gemini.py"
         script.write_text("")
-        with patch("recorder.cli.subprocess.call") as mock_call, \
+        with patch("recorder.cli.subprocess.call", return_value=0) as mock_call, \
              patch("recorder.cli._GEMINI_TRANSCRIBE_SCRIPT", script), \
              patch("builtins.input", return_value=""):
             cli._maybe_run_transcription(session, backend="gemini", ask=True)
-        mock_call.assert_not_called()
+        mock_call.assert_called_once()
 
     @pytest.mark.parametrize("answer", ["n", "N", "no", "NO", "н", "нет"])
     def test_no_skips_transcription(self, tmp_path, answer):

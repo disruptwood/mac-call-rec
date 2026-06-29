@@ -196,13 +196,16 @@ def _maybe_run_transcription(session, backend: str, ask: bool) -> None:
         return
 
     if ask:
-        backend_name = "локальную транскрипцию" if backend == "local" else "Gemini-транскрипцию"
+        if backend == "gemini":
+            prompt = "\nЗапустить транскрипцию через Gemini? [Y/n]: "
+        else:
+            prompt = "\nЗапустить локальную транскрипцию? [Y/n]: "
         try:
-            ans = input(f"\nЗапустить {backend_name}? [y/N]: ").strip().lower()
+            ans = input(prompt).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        if ans not in ("y", "yes", "д", "да"):
+        if ans in ("n", "no", "н", "нет"):
             return
 
     cmd = _transcription_command(session, backend)
