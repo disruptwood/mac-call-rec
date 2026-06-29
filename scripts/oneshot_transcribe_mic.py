@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """ONE-SHOT: transcribe using _mic.wav only (not recording.m4a).
 
-Created 2026-04-21 to rescue transcripts from two sessions where
-recording.m4a has mix bugs (mic/system drift + 96kHz artifact):
-  - therapy_20260417_101109 (Мария)
-  - therapy_20260421_131739 (Света)
+Created 2026-04-21 to rescue transcripts from older sessions where
+recording.m4a had mix bugs (mic/system drift + sample-rate artifacts).
 
 Since _mic.wav has both voices (no headphones — therapist bleeds through
 speakers into mic), we can run speaker identification directly on it.
@@ -13,7 +11,7 @@ mic timebase != system timebase, but internally consistent.
 DELETE THIS SCRIPT after recording pipeline is fixed.
 
 Usage:
-    python3 oneshot_transcribe_mic.py <session_dir> --speakers "Илья,Мария"
+    python3 oneshot_transcribe_mic.py <session_dir> --speakers "Client,Therapist"
 """
 
 from __future__ import annotations

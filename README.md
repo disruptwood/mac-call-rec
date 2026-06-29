@@ -1,66 +1,162 @@
 # call-recorder
 
-Запись обеих сторон голосовых звонков на macOS + транскрипция через Gemini.
+CLI для записи обеих сторон голосового звонка на macOS.
 
-## Quickstart
+По умолчанию проект ничего не отправляет в облако: запись сохраняется локально
+в `~/.call-recorder/recordings`, а транскрипция запускается только если явно
+выбран backend.
 
-```bash
-# Однократная установка
-brew install ffmpeg                                       # для mic-трека
-python3 -m venv ~/qwen-asr-env && source ~/qwen-asr-env/bin/activate
-pip install -e ".[gemini]"                                # recording + Gemini
-xcrun -sdk macosx swiftc scripts/capture_system_audio.swift -o scripts/capture_system_audio
-cp .env.example .env && $EDITOR .env                      # вписать GEMINI_API_KEY
-
-# Permissions (System Settings → Privacy & Security):
-#   - Screen Recording: разрешить Terminal/iTerm/IDE (для ScreenCaptureKit)
-#   - Microphone: разрешить Terminal/iTerm/IDE и Python (для PortAudio)
-```
-
-## Запись
+## Установка на новом Mac
 
 ```bash
-source ~/qwen-asr-env/bin/activate
-python3 -m recorder start -l "therapy"
-# наушники включены → лучше разделение голосов; без них работает, но с bleed
-# [space] пауза/resume, [q] стоп
+git clone <repo-url> call-recorder
+cd call-recorder
+./scripts/bootstrap_macos.sh
 ```
 
-Появится папка `~/.call-recorder/recordings/therapy_YYYYMMDD_HHMMSS/`
-с тремя WAV-источниками и одним m4a-миксом — см. [ARCHITECTURE.md](ARCHITECTURE.md#файлы-сессии).
+Что делает bootstrap:
+- ставит системные зависимости через Homebrew, если он доступен: `ffmpeg`, `portaudio`
+- создает `.venv` в проекте
+- ставит Python-пакет в editable mode
+- собирает `scripts/capture_system_audio` из Swift source
+- добавляет symlink `~/.local/bin/call-recorder`
 
-## Диагностика после записи
+Для локальной транскрипции сразу ставь тяжелые ML-зависимости:
 
 ```bash
-python3 scripts/diag_postmortem.py ~/.call-recorder/recordings/therapy_*
+./scripts/bootstrap_macos.sh --local-asr
 ```
 
-Покажет drift каждого mic-трека против system. Ожидаемое здоровое
-состояние: drift < 2%. Drift > 5% обычно означает что WebRTC в браузере
-посадил mic в VPIO режим — см. [ARCHITECTURE.md](ARCHITECTURE.md#почему-два-mic-трека-параллельно).
-
-## Транскрипция
+Если `~/.local/bin` не в `PATH`, добавь в `~/.zshrc`:
 
 ```bash
-python3 scripts/transcribe_gemini.py ~/.call-recorder/recordings/therapy_*/recording.m4a
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Положит `transcript_recording_gemini_*.md` рядом с входным файлом.
-Промпт настроен на русскоязычную терапевтическую сессию с диаризацией
-по таймкодам.
+## Первый запуск
+
+Один раз сохрани имя психолога для меню:
+
+```bash
+call-recorder init --therapist "Name"
+```
+
+Это пишет только локальный файл `~/.call-recorder/config.json`. Он не хранится
+в репозитории. После этого запуск:
+
+```bash
+call-recorder
+```
+
+Откроется меню: стрелки/цифры выбирают тип сессии, Enter стартует запись.
+
+Во время записи:
+- `[space]` — пауза/resume
+- `[q]` или Ctrl+C — стоп
+
+Посмотреть меню:
+
+```bash
+call-recorder sessions
+```
+
+Добавить еще одного психолога:
+
+```bash
+call-recorder therapist add "Another Name"
+```
+
+## Permissions macOS
+
+В `System Settings -> Privacy & Security` разреши терминалу, из которого
+запускается CLI:
+- `Screen Recording` — для системного звука через ScreenCaptureKit
+- `Microphone` — для микрофона через PortAudio
+
+Проверка окружения:
+
+```bash
+call-recorder setup
+```
+
+## Запись без меню
+
+```bash
+call-recorder start -l therapy
+call-recorder start -l therapy --no-transcribe
+```
+
+Папка сессии:
+
+```text
+~/.call-recorder/recordings/<label>_YYYYMMDD_HHMMSS/
+```
+
+Внутри остаются source-треки (`_mic_pa.wav`, `_system.wav`), микс
+`recording.m4a`, логи и `manifest.json`.
+
+## Локальная транскрипция
+
+Установи extra:
+
+```bash
+./scripts/bootstrap_macos.sh --local-asr
+```
+
+Запуск после записи:
+
+```bash
+call-recorder start --transcribe local
+```
+
+Или вручную на готовой сессии:
+
+```bash
+python3 scripts/transcribe.py ~/.call-recorder/recordings/<session>
+```
+
+Первый запуск локальных моделей может долго скачивать веса в Hugging Face cache.
+Для speaker identification нужны заранее сохраненные voice profiles:
+
+```bash
+python3 scripts/enroll_speakers.py <session_dir> --name "Therapist" --source system
+python3 scripts/enroll_speakers.py <session_dir> --name "Client" --source mic-clean
+```
+
+## Опционально: Gemini
+
+Cloud-транскрипция оставлена как опция, но не включена по умолчанию.
+
+```bash
+cp .env.example .env
+$EDITOR .env
+call-recorder start --transcribe gemini
+```
+
+`.env` находится в `.gitignore`; не коммить реальные ключи.
 
 ## Тесты
 
 ```bash
-pytest tests/                  # 63 теста, все subprocess замоканы, ~50ms
+pytest tests/
 ```
 
-Тесты НЕ должны спавнить реальные процессы (ffmpeg, Swift binary, Python
-скрипты, ML модели). См. шапку `tests/test_recording.py` для списка
-обязательных моков.
+Тесты не должны запускать реальные процессы записи, Swift helper, ffmpeg,
+Python subprocess транскрипции или ML-модели.
 
-## Где что лежит
+## Безопасность Git
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — что и почему так устроено,
-  включая объяснение VPIO drift и почему два mic-трека параллельно
-- [ROADMAP.md](ROADMAP.md) — что дальше и в каком порядке
+В репозитории не должны храниться:
+- `.env`, API keys, Hugging Face tokens
+- `~/.call-recorder/config.json`
+- аудиофайлы и transcripts
+- `scripts/capture_system_audio` compiled binary
+- `.venv`, `.pytest_cache`, локальные IDE/agent настройки
+
+Проверка перед push:
+
+```bash
+git status --short
+git grep -nE '/Users/|qwen-asr-env|therapy-svetlana|therapy-maria' -- ':!README.md'
+git grep -nE 'GEMINI_API_KEY=.+|HF_TOKEN=.+' -- ':!.env.example' ':!README.md'
+```

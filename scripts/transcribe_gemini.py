@@ -9,7 +9,7 @@ mlx-whisper / pyannote / Qwen3 pipeline (scripts/transcribe.py and friends)
 is kept as a fallback but is not invoked by default anymore.
 
 Usage:
-    # 1. Put GEMINI_API_KEY=... into project-root .env (gitignored).
+    # 1. Put your Gemini API key into project-root .env (gitignored).
     # 2. Either:
     uv run --no-project scripts/transcribe_gemini.py <path/to/audio.wav>
     # ...or with the project env directly:

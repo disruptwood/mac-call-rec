@@ -13,6 +13,14 @@ recordings/
 *.mp3
 *.aac
 *.flac
+*.capture.log
+*.pa.log
+
+# Transcripts and local speaker profiles
+transcript*.md
+transcript*.json
+speakers/
+*.npz
 
 # Config with personal settings
 config.json

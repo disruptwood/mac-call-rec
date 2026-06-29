@@ -3,11 +3,85 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 DEFAULT_CONFIG_PATH = Path.home() / ".call-recorder" / "config.json"
 DEFAULT_RECORDINGS_DIR = Path.home() / ".call-recorder" / "recordings"
+
+_SLUG_SAFE_RE = re.compile(r"[^a-z0-9._-]+")
+_SLUG_DASH_RE = re.compile(r"[-_.]{2,}")
+_CYRILLIC_TRANSLIT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+
+def slugify_label(value: str, *, fallback: str = "session", max_length: int = 64) -> str:
+    """Convert a display name into an ASCII label safe for directory names."""
+    value = value.strip().lower()
+    transliterated = "".join(_CYRILLIC_TRANSLIT.get(ch, ch) for ch in value)
+    normalized = unicodedata.normalize("NFKD", transliterated)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = _SLUG_SAFE_RE.sub("-", ascii_text)
+    slug = _SLUG_DASH_RE.sub("-", slug).strip("-_.")
+    if not slug:
+        slug = fallback
+    return slug[:max_length].strip("-_.") or fallback
+
+
+@dataclass
+class SessionType:
+    """A predefined session preset shown in the interactive start menu.
+
+    `name` is what the user sees in the picker (e.g. "Терапия").
+    `label` is the filename-safe slug stitched into the session directory
+    name (e.g. "therapy_20260522_140000"). Keep `label` ASCII / lowercase /
+    hyphenated — it ends up in paths and filenames.
+    """
+    name: str
+    label: str
+
+    @staticmethod
+    def defaults() -> list[SessionType]:
+        return [
+            SessionType(name="Терапия", label="therapy"),
+            SessionType(name="Созвон", label="meeting"),
+            SessionType(name="Интервью", label="interview"),
+        ]
 
 
 @dataclass
@@ -28,7 +102,7 @@ class AudioProfile:
             "headphones-broken-mic": AudioProfile(
                 name="headphones-broken-mic",
                 description="Headphones for listening, Mac mic for voice (broken headphone mic)",
-                preferred_mic="MacBook Air Microphone",
+                preferred_mic="MacBook",
             ),
             "headphones": AudioProfile(
                 name="headphones",
@@ -38,7 +112,7 @@ class AudioProfile:
             "speaker": AudioProfile(
                 name="speaker",
                 description="No headphones — Mac speakers and Mac mic",
-                preferred_mic="MacBook Air Microphone",
+                preferred_mic="MacBook",
             ),
         }
 
@@ -56,6 +130,12 @@ class RecordingConfig:
     active_profile: str = "headphones-broken-mic"
     profiles: dict[str, dict] = field(default_factory=dict)
     recordings_dir: str = str(DEFAULT_RECORDINGS_DIR)
+    transcription_backend: str = "none"
+
+    # Session presets shown in the interactive picker. Stored as raw dicts in
+    # JSON so the user can edit them by hand without re-encoding a custom
+    # dataclass. Empty list = use SessionType.defaults().
+    session_types: list[dict] = field(default_factory=list)
 
     def get_profile(self, name: str | None = None) -> AudioProfile:
         name = name or self.active_profile
@@ -80,6 +160,15 @@ class RecordingConfig:
             if name not in defaults:
                 all_profiles.append(AudioProfile(**d))
         return all_profiles
+
+    def list_session_types(self) -> list[SessionType]:
+        """Return configured session presets, falling back to defaults
+        when nothing is configured. Caller is responsible for appending the
+        "custom" option in the UI layer — it's not stored as a SessionType
+        because it has no fixed label."""
+        if not self.session_types:
+            return SessionType.defaults()
+        return [SessionType(**d) for d in self.session_types]
 
     def save(self, path: Path | None = None) -> None:
         path = path or DEFAULT_CONFIG_PATH

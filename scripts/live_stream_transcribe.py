@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 CAPTURE_BINARY = Path(__file__).parent / "capture_system_audio"
-QWEN_MODEL = "/Users/ilya/models/qwen3-asr-1.7b"
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "Qwen/Qwen3-ASR-1.7B")
 SAMPLE_RATE = 16000
 CHUNK_SEC = 2
 CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_SEC
@@ -46,7 +46,8 @@ def chunk_has_speech(chunk: np.ndarray, vad_model, threshold: float = 0.3) -> bo
 def find_mic_device() -> int | None:
     import sounddevice as sd
     for i, d in enumerate(sd.query_devices()):
-        if "MacBook Air Microphone" in d["name"] and d["max_input_channels"] > 0:
+        name = str(d["name"]).lower()
+        if "macbook" in name and "microphone" in name and d["max_input_channels"] > 0:
             return i
     return None
 
@@ -75,7 +76,7 @@ def main():
     import sounddevice as sd
     mic_idx = find_mic_device()
     if mic_idx is None:
-        print("WARNING: MacBook Air Microphone not found", flush=True)
+        print("WARNING: MacBook microphone not found", flush=True)
     else:
         print(f"Mic: device {mic_idx}", flush=True)
 

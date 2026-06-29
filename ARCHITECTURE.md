@@ -2,9 +2,9 @@
 
 ## Что это
 
-CLI для записи обеих сторон голосовых звонков на macOS. Запись + диагностика
-делается локально; транскрипция отправляется в Gemini (или локально, если есть
-желание — см. ниже).
+CLI для записи обеих сторон голосовых звонков на macOS. Запись и диагностика
+делаются локально. Транскрипция не запускается по умолчанию; пользователь явно
+выбирает local или Gemini backend.
 
 ## Запись
 
@@ -50,7 +50,19 @@ PortAudio (через Python `sounddevice`) ходит в CoreAudio HAL **нап
 
 ## Транскрипция
 
-**Основной путь — Gemini 3 Flash (cloud):**
+**Local backend:**
+
+`scripts/transcribe.py` + `scripts/enroll_speakers.py` — mlx-whisper +
+pyannote + enrolled speaker embeddings. Это offline-путь для локальной
+транскрипции после установки extra `local-asr`.
+
+CLI может запустить его после записи:
+
+```
+call-recorder start --transcribe local
+```
+
+**Gemini backend (cloud, optional):**
 
 ```
 recording.m4a → scripts/transcribe_gemini.py → transcript_<stem>_gemini_<model>.md
@@ -60,14 +72,8 @@ recording.m4a → scripts/transcribe_gemini.py → transcript_<stem>_gemini_<mod
 сделать диаризацию по таймкодам. Все safety-filters установлены в
 BLOCK_NONE (терапия попадает в фильтры по умолчанию).
 
-Требует `GEMINI_API_KEY` в `.env` (gitignored).
-
-**Локальный путь (fallback, не основной):**
-
-`scripts/transcribe.py` + `scripts/enroll_speakers.py` — mlx-whisper +
-pyannote + enrolled speaker embeddings. Сохранён в репо на случай если
-понадобится оффлайн или если Gemini будет не подходить. Запускается
-вручную; в основной recording-pipeline не интегрирован.
+Требует `GEMINI_API_KEY` в `.env` (gitignored). Не запускается без явного
+`--transcribe gemini` или локальной настройки `transcription_backend=gemini`.
 
 `scripts/diag_diarize.py`, `scripts/oneshot_transcribe_mic.py`,
 `scripts/live_stream_transcribe.py` — экспериментальные / legacy, не
@@ -108,29 +114,33 @@ python3 scripts/diag_postmortem.py ~/.call-recorder/recordings/<session>
 
 ```
 recorder/
-  __main__.py        ← python3 -m recorder
-  cli.py             ← argparse subcommands: start, stop, status, devices, setup, config
-  recording.py       ← RecordingEngine: lifecycle, segment management, ffmpeg/PA/Swift launch
+  __main__.py        ← python3 -m recorder (без аргументов = start с picker)
+  cli.py             ← argparse subcommands: start, stop, status, devices, setup,
+                       init, therapist, sessions, config. Содержит TUI picker,
+                       local session presets и post-recording transcribe hook.
+  recording.py       ← RecordingEngine: lifecycle, segment management, PA/Swift launch
   audio.py           ← AudioDevice/AudioSetup detection, headphone detection
-  config.py          ← RecordingConfig, AudioProfile
+  config.py          ← RecordingConfig, AudioProfile, SessionType
   setup_helper.py    ← ffmpeg presence check, setup instructions print
 
 scripts/
   capture_system_audio.swift  ← компилируется в capture_system_audio binary
   capture_mic_pa.py           ← PortAudio mic recorder (standalone subprocess)
-  transcribe_gemini.py        ← Gemini transcription (основной)
-  transcribe.py               ← mlx-whisper transcription (fallback, не интегрировано)
-  enroll_speakers.py          ← enrollment для local pipeline (fallback)
+  bootstrap_macos.sh          ← fresh-machine setup for macOS
+  transcribe.py               ← mlx-whisper transcription (local backend)
+  enroll_speakers.py          ← enrollment для local pipeline
+  transcribe_gemini.py        ← optional Gemini transcription
   diag_postmortem.py          ← post-session drift analysis
   diag_preflight.py           ← pre-session quick sync check
   diag_diarize.py             ← (legacy)
   oneshot_transcribe_mic.py   ← (legacy)
   live_stream_transcribe.py   ← (legacy)
 
-tests/                ← pytest, 60 тестов, все процессы мокаются
+tests/                ← pytest, 104 теста, все процессы мокаются
   test_recording.py   ← lifecycle, PA capture, system capture, volume mgmt, mixing
   test_audio.py       ← device detection
-  test_config.py      ← config + profiles
+  test_config.py      ← config + profiles + session types
+  test_cli.py         ← TUI session picker, post-recording transcribe prompt
   test_setup_helper.py
   test_diag_postmortem.py
 ```

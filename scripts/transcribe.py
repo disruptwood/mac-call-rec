@@ -2,7 +2,7 @@
 """Transcribe a call-recorder session with direct speaker identification.
 
 Pipeline (no pyannote diarization — uses enrolled embeddings directly):
-  1. Qwen3-ASR on recording.m4a with return_timestamps=True → word-level text
+  1. mlx-whisper on recording.m4a with word timestamps → word-level text
   2. Silero VAD on recording.m4a → speech regions
   3. Sliding windows (2s with 1s hop) inside speech regions → wespeaker embeddings
   4. Each window: cosine similarity vs enrolled profiles → assign speaker
@@ -17,7 +17,7 @@ Why no pyannote diarization:
   - Much faster (~10x) and uses our profiles continuously
 
 Usage:
-    python3 transcribe.py <session_dir> --speakers "Илья,Мария" --note "..."
+    python3 transcribe.py <session_dir> --speakers "Client,Therapist" --note "..."
 """
 
 from __future__ import annotations
@@ -429,11 +429,11 @@ def main():
     parser = argparse.ArgumentParser(description="Transcribe session using enrolled-embedding speaker ID")
     parser.add_argument("session_dir")
     parser.add_argument("--lang", default="Russian")
-    parser.add_argument("--model", default=QWEN_MODEL)
+    parser.add_argument("--model", default=WHISPER_MODEL)
     parser.add_argument("--note", default=None)
     parser.add_argument("--speakers-dir", default=str(SPEAKERS_DIR))
     parser.add_argument("--speakers", default=None,
-                        help="Comma-separated profile names (e.g. 'Илья,Мария')")
+                        help="Comma-separated profile names (e.g. 'Client,Therapist')")
     parser.add_argument("--smooth-radius", type=int, default=1,
                         help="Majority-vote radius for smoothing (default: 1 = 3-window window)")
     args = parser.parse_args()
@@ -469,7 +469,7 @@ def main():
         print(f"WARNING: only {len(profiles)} profile(s) loaded — all speech will map to one", flush=True)
 
     # Step 1: ASR with word timestamps
-    print(f"\n1/5 Transcribing with Qwen3-ASR (word timestamps)...", flush=True)
+    print(f"\n1/5 Transcribing with mlx-whisper (word timestamps)...", flush=True)
     t = time.time()
     asr = transcribe_asr(str(mixed_path), args.lang, args.model)
     print(f"    Done: {time.time() - t:.1f}s, {len(asr['words'])} words", flush=True)

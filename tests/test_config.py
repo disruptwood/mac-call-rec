@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from recorder.config import AudioProfile, RecordingConfig
+from recorder.config import AudioProfile, RecordingConfig, SessionType, slugify_label
 
 
 class TestAudioProfile:
@@ -108,3 +108,46 @@ class TestRecordingConfig:
         config = RecordingConfig(recordings_dir=str(tmp_path / "recs"))
         output = config.output_dir
         assert output.exists()
+
+
+class TestSessionTypes:
+    def test_defaults_are_public_and_generic(self):
+        defaults = SessionType.defaults()
+        labels = [s.label for s in defaults]
+        assert labels == ["therapy", "meeting", "interview"]
+
+    def test_list_session_types_falls_back_to_defaults_when_empty(self):
+        config = RecordingConfig()
+        assert config.session_types == []
+        types = config.list_session_types()
+        assert types == SessionType.defaults()
+
+    def test_list_session_types_uses_configured_when_present(self):
+        config = RecordingConfig()
+        config.session_types = [
+            {"name": "Созвон", "label": "meeting"},
+            {"name": "Интервью", "label": "interview"},
+        ]
+        types = config.list_session_types()
+        assert [s.label for s in types] == ["meeting", "interview"]
+
+    def test_session_types_persist_in_save_load_roundtrip(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config = RecordingConfig()
+        config.session_types = [{"name": "Созвон", "label": "meeting"}]
+        config.save(config_path)
+
+        loaded = RecordingConfig.load(config_path)
+        assert loaded.session_types == [{"name": "Созвон", "label": "meeting"}]
+        assert loaded.list_session_types()[0].label == "meeting"
+
+
+class TestSlugifyLabel:
+    def test_ascii_label_is_normalized(self):
+        assert slugify_label("Therapy Anna") == "therapy-anna"
+
+    def test_cyrillic_name_is_transliterated(self):
+        assert slugify_label("Терапия Анна") == "terapiya-anna"
+
+    def test_empty_label_uses_fallback(self):
+        assert slugify_label("   ", fallback="therapy") == "therapy"

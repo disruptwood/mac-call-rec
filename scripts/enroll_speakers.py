@@ -11,10 +11,10 @@ For therapy sessions without headphones:
 
 Usage:
     # Enroll therapist from system track (clean):
-    python3 enroll_speakers.py <session_dir> --name "Мария" --source system
+    python3 enroll_speakers.py <session_dir> --name "Therapist" --source system
 
     # Enroll user from mic track (auto-filters using VAD):
-    python3 enroll_speakers.py <session_dir> --name "Илья" --source mic-clean
+    python3 enroll_speakers.py <session_dir> --name "Client" --source mic-clean
 
     # List saved speakers:
     python3 enroll_speakers.py --list

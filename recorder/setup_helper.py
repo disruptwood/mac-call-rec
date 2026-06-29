@@ -50,6 +50,9 @@ Checklist:
      tracks are no longer cleanly separated.
 
 To record:
-  python3 -m recorder start -l "label"
+  call-recorder
+
+To add a therapist to the arrow-key menu:
+  call-recorder therapist add "Name"
 === End setup ===
 """)
